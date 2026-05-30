@@ -202,12 +202,12 @@ export default function Home() {
         console.error(
           "createTimetableEntry error",
           result.error?.message,
-          result.error?.details,
-          result.error?.hint,
+          (result.error as any)?.details,
+          (result.error as any)?.hint,
           result.error,
         );
-        setError(result.error.message || "시간표 저장에 실패했습니다.");
-        showToast(result.error.message || "시간표 저장에 실패했습니다.", "error");
+        setError((result.error as any).message || "시간표 저장에 실패했습니다.");
+        showToast((result.error as any).message || "시간표 저장에 실패했습니다.", "error");
       } else {
         setSubject("");
         setWeekday(1);
