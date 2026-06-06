@@ -1,6 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import Link from "next/link";
 import LoadingCard from "@/src/components/LoadingCard";
 import ToastMessage from "@/src/components/ToastMessage";
 import { useAuth } from "@/src/context/AuthContext";
@@ -8,48 +19,19 @@ import {
   createExamStrategy,
   deleteExamStrategy,
   getExamStrategies,
+  getUserTimetableSubjects,
   toggleExamStrategyCompleted,
+  updateExamStrategyScores,
 } from "@/src/lib/supabase";
 
-const examTabs = [
-  { label: "중간고사", value: "midterm" as const },
-  { label: "기말고사", value: "final" as const },
-];
-
-const scoreToGradePoint = (score?: number | null) => {
-  if (score == null || Number.isNaN(score)) return null;
-  if (score >= 90) return 4.5;
-  if (score >= 85) return 4.0;
-  if (score >= 80) return 3.5;
-  if (score >= 75) return 3.0;
-  if (score >= 70) return 2.5;
-  if (score >= 65) return 2.0;
-  if (score >= 60) return 1.5;
-  if (score >= 55) return 1.0;
-  return 0.0;
-};
-
-const isFinalDemoted = (item: ExamEntry) => {
-  return (
-    item.my_score != null &&
-    item.average_score != null &&
-    item.average_score - item.my_score >= 30
-  );
-};
-
-const getStrategyMessage = (item: ExamEntry, activeTab: "midterm" | "final") => {
-  if (activeTab === "midterm") {
-    return "중간고사 대비 전공 및 고학점 순으로 배치된 최우선 학습 과목입니다.";
-  }
-  return isFinalDemoted(item)
-    ? "중간고사 점수가 평균보다 30점 이상 낮아, 기말 평점 방어를 위해 학습 우선순위가 하향 조정되었습니다."
-    : "기말고사 대비 전공과 고학점 중심으로 전략적으로 정렬된 우선 학습 과목입니다.";
-};
+// ─── Types ────────────────────────────────────────────────────────────────────
+type ExamType = "midterm" | "final";
+type ViewMode  = "grid" | "table";
 
 type ExamEntry = {
   id: string;
   user_id: string;
-  exam_type: "midterm" | "final";
+  exam_type: ExamType;
   subject_name: string;
   is_major: boolean;
   credits: number;
@@ -60,729 +42,1111 @@ type ExamEntry = {
   created_at?: string;
 };
 
-type GradeRecord = {
-  id: string;
-  year: 1 | 2 | 3 | 4;
-  semester: "1학기" | "2학기";
-  gradePoint: number;
-  credits: number;
-  subject: string;
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function scoreToGradePoint(score?: number | null) {
+  if (score == null || Number.isNaN(score)) return null;
+  if (score >= 90) return 4.5;
+  if (score >= 85) return 4.0;
+  if (score >= 80) return 3.5;
+  if (score >= 75) return 3.0;
+  if (score >= 70) return 2.5;
+  if (score >= 65) return 2.0;
+  if (score >= 60) return 1.5;
+  if (score >= 55) return 1.0;
+  return 0.0;
+}
+
+function scoreToGradeLetter(score?: number | null): string {
+  if (score == null || Number.isNaN(score)) return "—";
+  if (score >= 90) return "A+";
+  if (score >= 85) return "A";
+  if (score >= 80) return "B+";
+  if (score >= 75) return "B";
+  if (score >= 70) return "C+";
+  if (score >= 65) return "C";
+  if (score >= 60) return "D+";
+  if (score >= 55) return "D";
+  return "F";
+}
+
+function estimatePercentile(myScore: number, avgScore: number): string {
+  const d = myScore - avgScore;
+  if (d >= 20) return "상위 약 10%";
+  if (d >= 15) return "상위 약 15%";
+  if (d >= 10) return "상위 약 20%";
+  if (d >= 5)  return "상위 약 30%";
+  if (d >= 0)  return "상위 약 50%";
+  if (d >= -5) return "상위 약 65%";
+  if (d >= -10) return "상위 약 75%";
+  if (d >= -15) return "상위 약 85%";
+  return "하위권";
+}
+
+function isFinalDemoted(item: ExamEntry) {
+  return item.my_score != null && item.average_score != null && item.average_score - item.my_score >= 30;
+}
+
+// ─── Priority Formula ─────────────────────────────────────────────────────────
+type RangeLevel  = "좁음" | "보통" | "넓음";
+type ScoreStatus = "잘봄" | "평균대" | "망함" | "미입력";
+
+function classifyStudyRange(range: string): { label: RangeLevel; score: number } {
+  const trimmed = range.trim();
+  const lines = trimmed.split("\n").filter((l) => l.trim()).length;
+  if (lines > 1) {
+    if (lines <= 2) return { label: "좁음", score: 3 };
+    if (lines <= 5) return { label: "보통", score: 2 };
+    return { label: "넓음", score: 1 };
+  }
+  if (trimmed.length < 25) return { label: "좁음", score: 3 };
+  if (trimmed.length <= 70) return { label: "보통", score: 2 };
+  return { label: "넓음", score: 1 };
+}
+
+function classifyScoreStatus(myScore: number | null, avgScore: number | null): { label: ScoreStatus; score: number } {
+  if (myScore == null || avgScore == null) return { label: "미입력", score: 2 };
+  if (myScore >= avgScore + 10) return { label: "잘봄",  score: 2 };
+  if (myScore <  avgScore - 10) return { label: "망함",  score: 1 };
+  return { label: "평균대", score: 3 };
+}
+
+function calcFinalBonus(finalWeightPct: number): number {
+  if (finalWeightPct >= 60) return  1;
+  if (finalWeightPct <= 40) return -1;
+  return 0;
+}
+
+function calcGapDeduction(myScore: number | null, avgScore: number | null): number {
+  if (myScore == null || avgScore == null) return 0;
+  const gap = avgScore - myScore;
+  if (gap <= 0)  return  0;
+  if (gap <= 15) return -1;
+  return 4;
+}
+
+function calcPriorityScore(item: ExamEntry, finalWeightPct: number): number {
+  const majorWeight  = item.is_major ? 1.5 : 1.0;
+  const creditWeight = item.credits / 3;
+  const rangeScore   = classifyStudyRange(item.study_range).score;
+  const statusScore  = classifyScoreStatus(item.my_score, item.average_score).score;
+  const finalBonus   = calcFinalBonus(finalWeightPct);
+  const gapDeduct    = calcGapDeduction(item.my_score, item.average_score);
+  const base = majorWeight * creditWeight * (rangeScore + statusScore + finalBonus);
+  return Math.round((base - gapDeduct) * 100) / 100;
+}
+
+const SCORE_STATUS_STYLE: Record<ScoreStatus, string> = {
+  잘봄:   "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800",
+  평균대: "bg-sky-100 text-sky-700 border-sky-200 dark:bg-sky-950/50 dark:text-sky-300 dark:border-sky-800",
+  망함:   "bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-950/50 dark:text-rose-300 dark:border-rose-800",
+  미입력: "bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700",
 };
 
+// ─── Entry Meta (기말비중 localStorage) ──────────────────────────────────────
+const GRADES_META_KEY = "smartgrade_grades_meta";
+type EntryMeta = { finalWeightPct: number };
+
+function loadGradesMeta(): Record<string, EntryMeta> {
+  try { return JSON.parse(localStorage.getItem(GRADES_META_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+// ─── Skeleton ─────────────────────────────────────────────────────────────────
+function SkeletonCard() {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex gap-4">
+        <div className="flex-1 space-y-3">
+          <div className="h-5 w-1/2 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+          <div className="h-4 w-3/4 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+          <div className="h-4 w-1/3 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+        </div>
+        <div className="h-10 w-20 animate-pulse rounded-3xl bg-slate-200 dark:bg-slate-700" />
+      </div>
+    </div>
+  );
+}
+
+// ─── Confetti ─────────────────────────────────────────────────────────────────
+const CONFETTI_COLORS = ["#0ea5e9","#8b5cf6","#10b981","#f59e0b","#f43f5e","#ec4899"];
+
+function Confetti() {
+  const pieces = useMemo(() =>
+    Array.from({ length: 60 }, (_, i) => ({
+      id: i,
+      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+      left: `${(i * 1.67) % 100}%`,
+      delay: `${(i * 50) % 2000}ms`,
+      dur: `${1500 + (i * 37) % 1000}ms`,
+    })), []);
+
+  return (
+    <>
+      <style>{`
+        @keyframes confetti-fall {
+          0%   { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+          100% { transform: translateY(110vh) rotate(540deg); opacity: 0; }
+        }
+      `}</style>
+      <div className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
+        {pieces.map((p) => (
+          <div
+            key={p.id}
+            style={{
+              position: "absolute",
+              left: p.left,
+              top: 0,
+              width: 10,
+              height: 10,
+              backgroundColor: p.color,
+              borderRadius: 2,
+              animation: `confetti-fall ${p.dur} ease-in forwards`,
+              animationDelay: p.delay,
+            }}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
 export default function GradesPage() {
   const { user, loading: authLoading } = useAuth();
-  const [activeTab, setActiveTab] = useState<"midterm" | "final">("midterm");
-  const [viewTab, setViewTab] = useState<"strategy" | "grade">("strategy");
-  const [entries, setEntries] = useState<ExamEntry[]>([]);
-  const [gradeRecords, setGradeRecords] = useState<GradeRecord[]>([]);
-  const [subjectName, setSubjectName] = useState("");
-  const [isMajor, setIsMajor] = useState(true);
-  const [credits, setCredits] = useState(3);
-  const [studyRange, setStudyRange] = useState("");
-  const [myScoreInput, setMyScoreInput] = useState("");
-  const [averageScoreInput, setAverageScoreInput] = useState("");
-  const [gradeSubject, setGradeSubject] = useState("");
-  const [gradeYear, setGradeYear] = useState<1 | 2 | 3 | 4>(1);
-  const [gradeSemester, setGradeSemester] = useState<"1학기" | "2학기">("1학기");
-  const [gradePointInput, setGradePointInput] = useState(4.0);
-  const [gradeCreditInput, setGradeCreditInput] = useState(3);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [toastType, setToastType] = useState<"success" | "error">("success");
 
-  const showToast = (message: string, type: "success" | "error" = "success") => {
-    setToastMessage(message);
+  const [activeTab, setActiveTab]   = useState<ExamType>("midterm");
+  const [viewMode, setViewMode]     = useState<ViewMode>("grid");
+  const [entries, setEntries]       = useState<ExamEntry[]>([]);
+  const [timetableSubjects, setTimetableSubjects] = useState<string[]>([]);
+
+  // Strategy form
+  const [subjectName, setSubjectName]         = useState("");
+  const [isDirectInput, setIsDirectInput]     = useState(false);
+  const [isMajor, setIsMajor]                 = useState(true);
+  const [credits, setCredits]                 = useState(3);
+  const [studyRange, setStudyRange]           = useState("");
+  const [studyRangeMode, setStudyRangeMode]   = useState<"text" | "checklist">("text");
+  const [checklistItems, setChecklistItems]   = useState<{ id: string; text: string; done: boolean }[]>([]);
+  const [newCheckItem, setNewCheckItem]       = useState("");
+  const [myScoreInput, setMyScoreInput]       = useState("");
+  const [averageScoreInput, setAverageScoreInput] = useState("");
+  const [finalWeightPct, setFinalWeightPct]   = useState(50);
+  const [formErrors, setFormErrors]           = useState<Record<string, string>>({});
+  const [entryMeta, setEntryMeta]             = useState<Record<string, EntryMeta>>({});
+
+  // UI state
+  const [deleteConfirmId, setDeleteConfirmId]   = useState<string | null>(null);
+  const [editingId, setEditingId]               = useState<string | null>(null);
+  const [editMyScore, setEditMyScore]           = useState("");
+  const [editAvgScore, setEditAvgScore]         = useState("");
+  const [showConfetti, setShowConfetti]         = useState(false);
+
+  const [loading, setLoading]           = useState(true);
+  const [saving, setSaving]             = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // 목표 GPA 역산
+  const [targetGpa,    setTargetGpa]    = useState(3.5);
+  const [remainCredit, setRemainCredit] = useState(15);
+  const [toastType, setToastType]       = useState<"success" | "error">("success");
+
+  const subjectNameRef = useRef<HTMLInputElement>(null);
+
+  const showToast = useCallback((msg: string, type: "success" | "error" = "success") => {
+    setToastMessage(msg);
     setToastType(type);
     window.setTimeout(() => setToastMessage(null), 4000);
-  };
+  }, []);
 
-  const fetchEntries = async () => {
+  // ─── Fetch ────────────────────────────────────────────────────────────────
+  const fetchEntries = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    try {
-      const response = await getExamStrategies(user.id, activeTab);
-      if (response.error) {
-        console.error("getExamStrategies error", response.error);
-        setError(response.error.message);
-        setEntries([]);
-        showToast("시험 전략 데이터를 불러오는 중 오류가 발생했습니다.", "error");
-      } else {
-        setError("");
-        setEntries((response.data ?? []) as ExamEntry[]);
-      }
-    } catch (err) {
-      console.error("fetchEntries error", err);
-      setError("시험 전략 조회 중 오류가 발생했습니다.");
-      setEntries([]);
-      showToast("시험 전략 조회 중 오류가 발생했습니다.", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
+    const res = await getExamStrategies(user.id, activeTab);
+    setEntries(res.error ? [] : ((res.data ?? []) as ExamEntry[]));
+    setLoading(false);
+  }, [user, activeTab]);
+
+  useEffect(() => { setEntryMeta(loadGradesMeta()); }, []);
 
   useEffect(() => {
     if (!user) return;
-    fetchEntries();
-  }, [user, activeTab]);
+    getUserTimetableSubjects(user.id).then((res) => {
+      if (!res.error) {
+        const list = Array.from(
+          new Set((res.data ?? []).map((i: { subject: string }) => i.subject).filter(Boolean)),
+        ) as string[];
+        setTimetableSubjects(list);
+      }
+    });
+  }, [user]);
 
-  const totalCredit = useMemo(
-    () => entries.reduce((sum, item) => sum + item.credits, 0),
-    [entries],
-  );
+  useEffect(() => { if (user) fetchEntries(); }, [user, activeTab]);
 
-  const totalGpa = useMemo(() => {
-    const scored = entries.filter((item) => item.my_score != null);
-    const totalPoints = scored.reduce((sum, item) => {
-      const point = scoreToGradePoint(item.my_score);
-      return sum + (point ?? 0) * item.credits;
-    }, 0);
-    const totalScoredCredits = scored.reduce((sum, item) => sum + item.credits, 0);
-    return totalScoredCredits ? (totalPoints / totalScoredCredits).toFixed(2) : "0.00";
+  const handleSubjectSelect = useCallback((value: string) => {
+    if (value === "__direct__") {
+      setIsDirectInput(true);
+      setSubjectName("");
+      return;
+    }
+    setIsDirectInput(false);
+    setSubjectName(value);
+    setFormErrors((p) => ({ ...p, subjectName: "" }));
+    const prev = entries.find((e) => e.subject_name === value);
+    if (prev != null) setIsMajor(prev.is_major);
+  }, [entries]);
+
+  // ─── Derived stats (exam strategies only) ────────────────────────────────
+  const examGpa = useMemo(() => {
+    const scored = entries.filter((i) => i.my_score != null);
+    const pts = scored.reduce((s, i) => s + (scoreToGradePoint(i.my_score) ?? 0) * i.credits, 0);
+    const cr  = scored.reduce((s, i) => s + i.credits, 0);
+    return cr ? (pts / cr).toFixed(2) : "0.00";
   }, [entries]);
 
   const majorGpa = useMemo(() => {
-    const scoredMajor = entries.filter((item) => item.is_major && item.my_score != null);
-    const totalPoints = scoredMajor.reduce((sum, item) => {
-      const point = scoreToGradePoint(item.my_score);
-      return sum + (point ?? 0) * item.credits;
-    }, 0);
-    const totalScoredMajorCredits = scoredMajor.reduce((sum, item) => sum + item.credits, 0);
-    return totalScoredMajorCredits ? (totalPoints / totalScoredMajorCredits).toFixed(2) : "0.00";
+    const scored = entries.filter((i) => i.is_major && i.my_score != null);
+    const pts = scored.reduce((s, i) => s + (scoreToGradePoint(i.my_score) ?? 0) * i.credits, 0);
+    const cr  = scored.reduce((s, i) => s + i.credits, 0);
+    return cr ? (pts / cr).toFixed(2) : "0.00";
   }, [entries]);
 
-  const remainingCount = useMemo(
-    () => entries.filter((item) => !item.is_completed).length,
-    [entries],
-  );
+  const totalCredit    = useMemo(() => entries.reduce((s, i) => s + i.credits, 0), [entries]);
+  const remainingCount = useMemo(() => entries.filter((i) => !i.is_completed).length, [entries]);
+  const majorHigher    = parseFloat(majorGpa) > parseFloat(examGpa);
 
-  const totalGradeCredits = useMemo(
-    () => gradeRecords.reduce((sum, record) => sum + record.credits, 0),
-    [gradeRecords],
-  );
+  const scoreChartData = useMemo(() =>
+    entries
+      .filter((e) => e.my_score != null || e.average_score != null)
+      .map((e) => ({
+        name: e.subject_name.length > 5 ? `${e.subject_name.slice(0, 5)}…` : e.subject_name,
+        내점수: e.my_score ?? 0,
+        평균: e.average_score ?? 0,
+      })),
+  [entries]);
 
-  const gradePointsSum = useMemo(
-    () => gradeRecords.reduce((sum, record) => sum + record.gradePoint * record.credits, 0),
-    [gradeRecords],
-  );
+  // ─── 목표 GPA 역산 계산 ──────────────────────────────────────────────────────
+  const gpaCalc = useMemo(() => {
+    const currentGpa   = parseFloat(examGpa);
+    const scoredCredit = entries.filter((i) => i.my_score != null).reduce((s, i) => s + i.credits, 0);
+    const remain       = Math.max(remainCredit, 1);
+    const totalExp     = scoredCredit + remain;
+    const currentPts   = currentGpa * scoredCredit;
 
-  const combinedTotalCredit = useMemo(
-    () => totalCredit + totalGradeCredits,
-    [totalCredit, totalGradeCredits],
-  );
+    const needed = (targetGpa * totalExp - currentPts) / remain;
+    const neededRound  = Math.round(needed * 100) / 100;
+    const isImpossible = neededRound > 4.5;
 
-  const combinedGpa = useMemo(() => {
-    const entryPoints = entries.reduce((sum, item) => {
-      if (item.my_score == null) return sum;
-      const point = scoreToGradePoint(item.my_score);
-      return sum + (point ?? 0) * item.credits;
-    }, 0);
-    const entryCredits = entries.reduce((sum, item) => sum + (item.my_score != null ? item.credits : 0), 0);
-    const totalPoints = entryPoints + gradePointsSum;
-    const totalCredits = entryCredits + totalGradeCredits;
-    return totalCredits ? (totalPoints / totalCredits).toFixed(2) : "0.00";
-  }, [entries, gradePointsSum, totalGradeCredits]);
+    let diffMsg: string;
+    if (isImpossible)          diffMsg = "달성이 불가능해요 ❌";
+    else if (neededRound > 4.0) diffMsg = "매우 어려워요 😰";
+    else if (neededRound > 3.5) diffMsg = "도전해볼 만해요 🔥";
+    else if (neededRound > 3.0) diffMsg = "충분히 가능해요 💪";
+    else                        diffMsg = "여유 있어요 😊";
 
-  const gradeTrend = useMemo(() => {
-    return gradeRecords.map((record, index) => ({
-      label: `${record.year}학년 ${record.semester}`,
-      value: record.gradePoint,
-      x: gradeRecords.length > 1 ? (index * 100) / (gradeRecords.length - 1) : 0,
+    const scenarios = [
+      { label: "A+ 만점", gp: 4.5 },
+      { label: "A0 평균", gp: 4.0 },
+      { label: "B+ 평균", gp: 3.5 },
+      { label: "B0 평균", gp: 3.0 },
+    ].map(({ label, gp }) => ({
+      label,
+      gp,
+      finalGpa: Math.round(((currentPts + gp * remain) / totalExp) * 100) / 100,
     }));
-  }, [gradeRecords]);
+
+    return {
+      currentGpa,
+      scoredCredit,
+      totalExp,
+      neededGpa: neededRound,
+      isImpossible,
+      isEasy: neededRound <= 3.0,
+      diffMsg,
+      scenarios,
+      currentPct: Math.min((currentGpa / 4.5) * 100, 100),
+      targetPct:  Math.min((targetGpa  / 4.5) * 100, 100),
+    };
+  }, [examGpa, entries, targetGpa, remainCredit]);
 
   const sortedEntries = useMemo(() => {
-    const sorted = [...entries];
-    if (activeTab === "midterm") {
-      sorted.sort((a, b) => {
+    return [...entries]
+      .map((item) => {
+        const fwp = entryMeta[item.id]?.finalWeightPct ?? 50;
+        return {
+          ...item,
+          _score:  calcPriorityScore(item, fwp),
+          _range:  classifyStudyRange(item.study_range),
+          _status: classifyScoreStatus(item.my_score, item.average_score),
+        };
+      })
+      .sort((a, b) => {
+        if (b._score !== a._score) return b._score - a._score;
+        if (b.credits !== a.credits) return b.credits - a.credits;
         if (a.is_major !== b.is_major) return a.is_major ? -1 : 1;
-        if (a.credits !== b.credits) return b.credits - a.credits;
-        return a.subject_name.localeCompare(b.subject_name, "ko");
+        return b._range.score - a._range.score;
       });
-      return sorted;
-    }
+  }, [entries, entryMeta]);
 
-    sorted.sort((a, b) => {
-      const aDemoted = isFinalDemoted(a);
-      const bDemoted = isFinalDemoted(b);
-      if (aDemoted !== bDemoted) return aDemoted ? 1 : -1;
-      if (a.is_major !== b.is_major) return a.is_major ? -1 : 1;
-      if (a.credits !== b.credits) return b.credits - a.credits;
-      return a.subject_name.localeCompare(b.subject_name, "ko");
-    });
-    return sorted;
-  }, [entries, activeTab]);
+  useEffect(() => {
+    if (entries.length > 0 && entries.every((e) => e.is_completed)) {
+      setShowConfetti(true);
+      window.setTimeout(() => setShowConfetti(false), 3500);
+    }
+  }, [entries]);
 
-  const handleAddGradeRecord = () => {
-    if (!gradeSubject.trim()) {
-      setError("과목명은 필수 입력 항목입니다.");
-      return;
-    }
-    if (gradePointInput < 0 || gradePointInput > 4.5) {
-      setError("평점은 0.0에서 4.5 사이여야 합니다.");
-      return;
-    }
-    setGradeRecords((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${gradeSubject}`,
-        year: gradeYear,
-        semester: gradeSemester,
-        gradePoint: Number(gradePointInput),
-        credits: Number(gradeCreditInput),
-        subject: gradeSubject.trim(),
-      },
-    ]);
-    setGradeSubject("");
-    setGradePointInput(4.0);
-    setGradeCreditInput(3);
-    setError("");
-    showToast("학점 정보가 저장되었습니다.", "success");
+  // ─── Handlers ─────────────────────────────────────────────────────────────
+  const validateStrategyForm = () => {
+    const errs: Record<string, string> = {};
+    if (!subjectName.trim()) errs.subjectName = "과목명을 입력해주세요";
+    if (studyRangeMode === "text" && !studyRange.trim()) errs.studyRange = "시험 범위를 입력해주세요";
+    if (studyRangeMode === "checklist" && checklistItems.length === 0) errs.studyRange = "체크리스트 항목을 추가해주세요";
+    const my  = myScoreInput.trim() ? Number(myScoreInput) : null;
+    const avg = averageScoreInput.trim() ? Number(averageScoreInput) : null;
+    if (my  != null && (my  < 0 || my  > 100)) errs.myScore  = "0~100 사이로 입력하세요";
+    if (avg != null && (avg < 0 || avg > 100)) errs.avgScore = "0~100 사이로 입력하세요";
+    setFormErrors(errs);
+    return Object.keys(errs).length === 0;
   };
 
   const handleAdd = async () => {
-    if (authLoading) {
-      setError("인증 정보를 불러오는 중입니다. 잠시만 기다려주세요.");
-      return;
-    }
-    if (!user) {
-      setError("로그인 후에 학습 전략을 저장할 수 있습니다.");
-      return;
-    }
-    if (!subjectName.trim() || !studyRange.trim()) {
-      setError("과목명과 시험 범위는 필수 입력입니다.");
-      return;
-    }
-
-    const myScore = myScoreInput.trim() ? Number(myScoreInput) : null;
-    const averageScore = averageScoreInput.trim() ? Number(averageScoreInput) : null;
-
-    if (myScore != null && (myScore < 0 || myScore > 100)) {
-      setError("내 시험 점수는 0에서 100 사이여야 합니다.");
-      return;
-    }
-    if (averageScore != null && (averageScore < 0 || averageScore > 100)) {
-      setError("시험 평균 점수는 0에서 100 사이여야 합니다.");
-      return;
-    }
-
+    if (!user) { showToast("로그인이 필요합니다.", "error"); return; }
+    if (!validateStrategyForm()) return;
+    const finalRange = studyRangeMode === "checklist"
+      ? checklistItems.map((i) => `- ${i.text}`).join("\n")
+      : studyRange.trim();
     setSaving(true);
-    try {
-      const response = await createExamStrategy({
-        user_id: user.id,
-        exam_type: activeTab,
-        subject_name: subjectName.trim(),
-        is_major: isMajor,
-        credits,
-        study_range: studyRange.trim(),
-        my_score: myScore,
-        average_score: averageScore,
-      });
-
-      if (response.error) {
-        console.error("createExamStrategy error", response.error);
-        setError(response.error.message);
-        showToast("학습 전략 저장에 실패했습니다.", "error");
-      } else {
-        setSubjectName("");
-        setIsMajor(true);
-        setCredits(3);
-        setStudyRange("");
-        setMyScoreInput("");
-        setAverageScoreInput("");
-        await fetchEntries();
-        setError("");
-        showToast("학습 전략이 저장되었습니다.", "success");
+    const res = await createExamStrategy({
+      user_id: user.id,
+      exam_type: activeTab,
+      subject_name: subjectName.trim(),
+      is_major: isMajor,
+      credits,
+      study_range: finalRange,
+      my_score: myScoreInput.trim() ? Number(myScoreInput) : null,
+      average_score: averageScoreInput.trim() ? Number(averageScoreInput) : null,
+    });
+    if (res.error) {
+      showToast("저장에 실패했습니다.", "error");
+    } else {
+      const newId = (res.data as any)?.[0]?.id as string | undefined;
+      if (newId) {
+        const newMeta = { ...loadGradesMeta(), [newId]: { finalWeightPct } };
+        localStorage.setItem(GRADES_META_KEY, JSON.stringify(newMeta));
+        setEntryMeta(newMeta);
       }
-    } catch (err) {
-      console.error("handleAdd error", err);
-      setError("학습 전략 저장 중 오류가 발생했습니다.");
-      showToast("학습 전략 저장 중 오류가 발생했습니다.", "error");
-    } finally {
-      setSaving(false);
+      setSubjectName(""); setIsDirectInput(false); setIsMajor(true); setCredits(3);
+      setStudyRange(""); setChecklistItems([]); setNewCheckItem("");
+      setMyScoreInput(""); setAverageScoreInput(""); setFinalWeightPct(50); setFormErrors({});
+      await fetchEntries();
+      showToast("과목이 추가되었습니다.", "success");
+      subjectNameRef.current?.focus();
     }
+    setSaving(false);
   };
 
   const handleDelete = async (id: string) => {
-    if (authLoading) {
-      setError("인증 정보를 불러오는 중입니다. 잠시만 기다려주세요.");
-      return;
-    }
-    if (!user) {
-      setError("로그인 후에 삭제할 수 있습니다.");
-      return;
-    }
+    if (!user) { showToast("로그인이 필요합니다.", "error"); return; }
     setSaving(true);
-    try {
-      const response = await deleteExamStrategy(id);
-      if (response.error) {
-        console.error("deleteExamStrategy error", response.error);
-        setError(response.error.message);
-        showToast("학습 전략 삭제에 실패했습니다.", "error");
-      } else {
-        await fetchEntries();
-        showToast("학습 전략이 삭제되었습니다.", "success");
-      }
-    } catch (err) {
-      console.error("handleDelete error", err);
-      setError("학습 전략 삭제 중 오류가 발생했습니다.");
-      showToast("학습 전략 삭제 중 오류가 발생했습니다.", "error");
-    } finally {
-      setSaving(false);
-    }
+    const res = await deleteExamStrategy(id);
+    if (res.error) showToast("삭제에 실패했습니다.", "error");
+    else { setDeleteConfirmId(null); await fetchEntries(); showToast("과목이 삭제되었습니다.", "success"); }
+    setSaving(false);
   };
 
-  const handleToggleCompleted = async (id: string, currentState: boolean) => {
-    if (authLoading) {
-      setError("인증 정보를 불러오는 중입니다. 잠시만 기다려주세요.");
-      return;
-    }
-    if (!user) {
-      setError("로그인 후에 상태를 변경할 수 있습니다.");
-      return;
-    }
+  const handleToggleCompleted = async (id: string, current: boolean) => {
+    if (!user) { showToast("로그인이 필요합니다.", "error"); return; }
     setSaving(true);
-    try {
-      const response = await toggleExamStrategyCompleted(id, !currentState);
-      if (response.error) {
-        console.error("toggleExamStrategyCompleted error", response.error);
-        setError(response.error.message);
-        showToast("상태 변경에 실패했습니다.", "error");
-      } else {
-        await fetchEntries();
-        showToast("시험 전략 상태가 업데이트되었습니다.", "success");
-      }
-    } catch (err) {
-      console.error("handleToggleCompleted error", err);
-      setError("상태 변경 중 오류가 발생했습니다.");
-      showToast("상태 변경 중 오류가 발생했습니다.", "error");
-    } finally {
-      setSaving(false);
-    }
+    const res = await toggleExamStrategyCompleted(id, !current);
+    if (res.error) showToast("상태 변경에 실패했습니다.", "error");
+    else { await fetchEntries(); if (!current) showToast("학습 완료! 🎉", "success"); }
+    setSaving(false);
   };
 
-  if (authLoading) {
-    return <LoadingCard />;
-  }
+  const handleEditSave = async (id: string) => {
+    if (!user) return;
+    const my  = editMyScore.trim() ? Number(editMyScore) : null;
+    const avg = editAvgScore.trim() ? Number(editAvgScore) : null;
+    if ((my != null && (my < 0 || my > 100)) || (avg != null && (avg < 0 || avg > 100))) {
+      showToast("점수는 0~100 사이여야 합니다.", "error"); return;
+    }
+    setSaving(true);
+    const res = await updateExamStrategyScores(id, my, avg);
+    if (res.error) showToast("수정에 실패했습니다.", "error");
+    else { setEditingId(null); await fetchEntries(); showToast("점수가 수정되었습니다.", "success"); }
+    setSaving(false);
+  };
 
+  // ─── Guards ────────────────────────────────────────────────────────────────
+  if (authLoading) return <LoadingCard />;
   if (!user) {
     return (
-      <div className="rounded-[2rem] border border-gray-100 bg-white p-8 shadow-sm">
-        <p className="text-base text-gray-600">로그인 후 시험 전략 플래너를 사용할 수 있습니다.</p>
+      <div className="rounded-[2rem] bg-white p-8 shadow-sm dark:bg-slate-900">
+        <p className="text-base text-slate-600 dark:text-slate-300">로그인 후 성적 관리 기능을 사용할 수 있습니다.</p>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-gray-50/50 px-6 py-8">
-      <section className="rounded-[2rem] border border-gray-100 bg-white p-8 shadow-sm">
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.22em] text-gray-500">📘 성적 전략 플래너</p>
-            <h1 className="mt-3 text-3xl font-semibold text-slate-900">시험 전략과 GPA를 한 곳에서</h1>
-            <p className="mt-3 max-w-2xl text-sm text-gray-500">
-              중간고사와 기말고사 탭을 전환하며 학습 우선순위를 분석하고, 실시간 GPA와 누적 이수 학점을 확인하세요.
-            </p>
-          </div>
+  const gpaNum   = parseFloat(examGpa);
+  const gaugePct = Math.min((gpaNum / 4.5) * 100, 100);
 
-          <div className="rounded-full bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700">
-            남은 과목 {remainingCount}개
+  return (
+    <div className="space-y-6">
+      {showConfetti && <Confetti />}
+
+      {/* ── 헤더 + 시험 GPA 요약 카드 ──────────────────────── */}
+      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">📊 성적 관리</p>
+            <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">시험 점수 & 공부 전략</h1>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* 뷰 모드 토글 */}
+            <div className="flex rounded-full border border-slate-200 p-1 dark:border-slate-700">
+              <button type="button" onClick={() => setViewMode("grid")}
+                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "grid" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              </button>
+              <button type="button" onClick={() => setViewMode("table")}
+                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "table" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+              </button>
+            </div>
+            <Link href="/credits"
+              className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-300">
+              🎓 학점 관리
+            </Link>
+            <span className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              남은 과목 {remainingCount}개
+            </span>
           </div>
         </div>
 
-        <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="inline-flex rounded-full bg-gray-100 p-1">
-            {examTabs.map((tab) => (
-              <button
-                key={tab.value}
-                type="button"
-                onClick={() => setActiveTab(tab.value)}
-                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  activeTab === tab.value
-                    ? "bg-white shadow-sm text-slate-900"
-                    : "text-gray-500"
-                }`}
-              >
-                {tab.label}
+        {majorHigher && (
+          <div className="mt-4 flex items-center gap-3 rounded-[1.25rem] border border-emerald-200 bg-emerald-50 px-4 py-3 dark:border-emerald-900/40 dark:bg-emerald-950/30">
+            <span className="text-lg">🌟</span>
+            <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+              전공 역량이 뛰어나요! 전공 GPA({majorGpa})가 전체 GPA({examGpa})보다 높습니다.
+            </p>
+          </div>
+        )}
+
+        {/* 이번 시험 GPA 3개 stat */}
+        <div className="mt-5 grid grid-cols-3 gap-3">
+          <div className="col-span-3 rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-950 sm:col-span-1">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">이번 시험 예상 GPA</p>
+            {gpaNum === 0 ? (
+              <p className="mt-2 text-sm text-slate-400 dark:text-slate-500">점수를 입력하면 표시됩니다</p>
+            ) : (
+              <>
+                <p className="mt-1 text-3xl font-bold text-sky-600 dark:text-sky-400">{examGpa}</p>
+                <div className="mt-3">
+                  <div className="flex justify-between text-[10px] text-slate-400 mb-1"><span>0.0</span><span>4.5</span></div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                    <div className="h-full rounded-full bg-sky-500 transition-all duration-500" style={{ width: `${gaugePct}%` }} />
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">전공 GPA</p>
+            <p className={`mt-1 text-3xl font-bold ${majorHigher ? "text-emerald-600 dark:text-emerald-400" : parseFloat(majorGpa) < parseFloat(examGpa) ? "text-rose-600 dark:text-rose-400" : "text-slate-900 dark:text-slate-100"}`}>
+              {majorGpa}
+            </p>
+            <p className={`mt-1 text-xs font-medium ${majorHigher ? "text-emerald-500" : "text-rose-500"}`}>
+              {majorHigher ? "▲ 전체 대비 높음" : "▼ 전체 대비 낮음"}
+            </p>
+          </div>
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">이수 예정 학점</p>
+            <p className="mt-1 text-3xl font-bold text-slate-900 dark:text-slate-100">{totalCredit}</p>
+            <p className="mt-1 text-xs text-slate-400">학점</p>
+          </div>
+        </div>
+
+        {/* 누적 GPA 안내 */}
+        <div className="mt-4 flex items-center gap-3 rounded-[1.25rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-950/50">
+          <span className="text-base">🎓</span>
+          <p className="text-sm text-slate-600 dark:text-slate-400">
+            누적 GPA · 졸업학점 관리는{" "}
+            <Link href="/credits" className="font-semibold text-sky-600 underline-offset-2 hover:underline dark:text-sky-400">
+              학점 관리 페이지
+            </Link>
+            에서 확인하세요.
+          </p>
+        </div>
+
+        {/* 중간/기말 탭 */}
+        <div className="mt-6">
+          <div className="flex overflow-hidden rounded-full border border-slate-200 p-1 dark:border-slate-700 w-fit">
+            {(["midterm", "final"] as const).map((tab) => (
+              <button key={tab} type="button" onClick={() => setActiveTab(tab)}
+                className={`rounded-full px-5 py-2 text-sm font-semibold transition ${activeTab === tab ? "bg-sky-600 text-white" : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"}`}>
+                {tab === "midterm" ? "중간고사" : "기말고사"}
               </button>
             ))}
           </div>
-
-          <div className="inline-flex rounded-full bg-gray-100 p-1">
-            <button
-              type="button"
-              onClick={() => setViewTab("strategy")}
-              className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                viewTab === "strategy"
-                  ? "bg-white shadow-sm text-slate-900"
-                  : "text-gray-500"
-              }`}
-            >
-              과목별 시험 전략
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewTab("grade")}
-              className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                viewTab === "grade"
-                  ? "bg-white shadow-sm text-slate-900"
-                  : "text-gray-500"
-              }`}
-            >
-              전체 학점 관리
-            </button>
-          </div>
         </div>
 
-        <div className="mt-8 grid gap-4 sm:grid-cols-3">
-          <div className="rounded-3xl border border-gray-100 bg-gray-50 p-5">
-            <p className="text-sm font-medium text-gray-500">전체 GPA</p>
-            <p className="mt-3 text-3xl font-semibold text-slate-900">{combinedGpa}</p>
-          </div>
-          <div className="rounded-3xl border border-gray-100 bg-gray-50 p-5">
-            <p className="text-sm font-medium text-gray-500">전공 GPA</p>
-            <p className="mt-3 text-3xl font-semibold text-slate-900">{majorGpa}</p>
-          </div>
-          <div className="rounded-3xl border border-gray-100 bg-gray-50 p-5">
-            <p className="text-sm font-medium text-gray-500">총 이수 학점</p>
-            <p className="mt-3 text-3xl font-semibold text-slate-900">{combinedTotalCredit}</p>
-          </div>
-        </div>
-
-        {viewTab === "strategy" ? (
-          <div className="mt-8">
-            <div className="rounded-3xl border border-gray-100 bg-gray-50 p-6">
-              <div className="grid gap-4">
-                <div>
-                  <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">과목명</label>
-                  <input
-                    value={subjectName}
-                    onChange={(e) => setSubjectName(e.target.value)}
-                    placeholder="과목명을 입력하세요"
-                    className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                  />
+        {/* ── 과목 추가 폼 ─────────────────────────────────── */}
+        <div className="mt-6 rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6 dark:border-slate-700 dark:bg-slate-950">
+          <p className="mb-4 text-sm font-semibold text-slate-700 dark:text-slate-300">
+            {activeTab === "midterm" ? "중간고사" : "기말고사"} 과목 시험 전략 추가
+          </p>
+          <div className="grid gap-4">
+            {/* 과목명 */}
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">과목명 *</label>
+              {timetableSubjects.length === 0 ? (
+                <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+                  <p className="text-sm text-amber-700 dark:text-amber-300">
+                    시간표에 과목을 먼저 등록해주세요.
+                    <br />
+                    <span className="text-xs opacity-75">홈 대시보드 → 주간 시간표에서 과목을 추가할 수 있습니다.</span>
+                  </p>
                 </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">이수 구분</label>
-                    <select
-                      value={isMajor ? "major" : "elective"}
-                      onChange={(e) => setIsMajor(e.target.value === "major")}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      <option value="major">전공</option>
-                      <option value="elective">교양</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">학점</label>
-                    <select
-                      value={credits}
-                      onChange={(e) => setCredits(Number(e.target.value))}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      {[1, 2, 3, 4].map((value) => (
-                        <option key={value} value={value}>
-                          {value}학점
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">시험 범위</label>
-                  <input
-                    value={studyRange}
-                    onChange={(e) => setStudyRange(e.target.value)}
-                    placeholder="시험 범위를 입력하세요"
-                    className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                  />
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">내 시험 점수</label>
-                    <input
-                      value={myScoreInput}
-                      onChange={(e) => setMyScoreInput(e.target.value)}
-                      placeholder="선택 입력"
-                      type="number"
-                      min={0}
-                      max={100}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">시험 평균 점수</label>
-                    <input
-                      value={averageScoreInput}
-                      onChange={(e) => setAverageScoreInput(e.target.value)}
-                      placeholder="선택 입력"
-                      type="number"
-                      min={0}
-                      max={100}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleAdd}
-                  disabled={saving || !subjectName.trim() || !studyRange.trim()}
-                  className="mt-2 inline-flex items-center justify-center rounded-3xl bg-gray-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  추가하기
-                </button>
-
-                {error ? <p className="text-sm text-rose-600">{error}</p> : null}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-8 grid gap-6 xl:grid-cols-[1.45fr_0.95fr]">
-            <div className="rounded-3xl border border-gray-100 bg-gray-50 p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-500">학년별 평점 추이</p>
-                  <p className="mt-2 text-sm text-gray-600">추가한 학점 데이터를 기반으로 GPA 추이를 시각화합니다.</p>
-                </div>
-                <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-500">{gradeRecords.length}개 추가</span>
-              </div>
-              <div className="mt-6 h-64 w-full rounded-3xl bg-white p-4 shadow-sm">
-                {gradeTrend.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-sm text-gray-500">
-                    학점을 추가하면 라인 차트가 표시됩니다.
-                  </div>
-                ) : (
-                  <svg viewBox="0 0 300 120" className="h-full w-full">
-                    <polyline
-                      fill="none"
-                      stroke="#0284c7"
-                      strokeWidth="3"
-                      points={gradeTrend
-                        .map((point) => `${point.x * 2.4 + 20},${110 - (point.value / 4.5) * 80}`)
-                        .join(" ")}
-                    />
-                    {gradeTrend.map((point, index) => (
-                      <g key={point.label}>
-                        <circle cx={point.x * 2.4 + 20} cy={110 - (point.value / 4.5) * 80} r="5" fill="#0284c7" />
-                        <text x={point.x * 2.4 + 20} y="116" textAnchor="middle" className="text-[10px] fill-slate-500">
-                          {gradeTrend[index].label}
-                        </text>
-                      </g>
-                    ))}
+              ) : (
+                <div className="relative mt-2">
+                  <select
+                    value={isDirectInput ? "__direct__" : subjectName}
+                    onChange={(e) => handleSubjectSelect(e.target.value)}
+                    className={`w-full appearance-none rounded-3xl border px-4 py-3 pr-10 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${
+                      formErrors.subjectName
+                        ? "border-rose-400 bg-rose-50 dark:border-rose-600 dark:bg-rose-950/20"
+                        : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"
+                    }`}>
+                    <option value="">과목을 선택하세요</option>
+                    {timetableSubjects.map((s) => <option key={s} value={s}>{s}</option>)}
+                    <option value="__direct__">✏️ 직접 입력</option>
+                  </select>
+                  <svg className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="6 9 12 15 18 9" />
                   </svg>
-                )}
+                </div>
+              )}
+              {(isDirectInput || timetableSubjects.length === 0) && (
+                <input
+                  ref={subjectNameRef}
+                  value={subjectName}
+                  onChange={(e) => { setSubjectName(e.target.value); setFormErrors((p) => ({ ...p, subjectName: "" })); }}
+                  placeholder={isDirectInput ? "과목명을 직접 입력하세요" : "과목명을 입력하세요"}
+                  autoFocus={isDirectInput}
+                  className={`mt-2 w-full rounded-3xl border px-4 py-3 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${
+                    formErrors.subjectName
+                      ? "border-rose-400 bg-rose-50 dark:border-rose-600 dark:bg-rose-950/20"
+                      : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"
+                  }`}
+                />
+              )}
+              {!isDirectInput && subjectName && (
+                <p className="mt-1.5 ml-3 text-xs text-sky-600 dark:text-sky-400">✓ 이전 등록 이력으로 이수 구분이 자동 설정되었습니다</p>
+              )}
+              {formErrors.subjectName && <p className="mt-1 ml-3 text-xs text-rose-600">{formErrors.subjectName}</p>}
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">이수 구분</label>
+                <select value={isMajor ? "major" : "elective"} onChange={(e) => setIsMajor(e.target.value === "major")}
+                  className="mt-2 w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                  <option value="major">전공</option>
+                  <option value="elective">교양</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">학점</label>
+                <select value={credits} onChange={(e) => setCredits(Number(e.target.value))}
+                  className="mt-2 w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                  {[1,2,3,4].map((v) => <option key={v} value={v}>{v}학점</option>)}
+                </select>
               </div>
             </div>
 
-            <div className="rounded-3xl border border-gray-100 bg-gray-50 p-6">
-              <div className="grid gap-4">
-                <div>
-                  <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">과목명</label>
-                  <input
-                    value={gradeSubject}
-                    onChange={(e) => setGradeSubject(e.target.value)}
-                    placeholder="과목명을 입력하세요"
-                    className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                  />
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">학년</label>
-                    <select
-                      value={gradeYear}
-                      onChange={(e) => setGradeYear(Number(e.target.value) as 1 | 2 | 3 | 4)}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      {[1, 2, 3, 4].map((value) => (
-                        <option key={value} value={value}>
-                          {value}학년
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">학기</label>
-                    <select
-                      value={gradeSemester}
-                      onChange={(e) => setGradeSemester(e.target.value as "1학기" | "2학기")}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      {(["1학기", "2학기"] as const).map((semester) => (
-                        <option key={semester} value={semester}>
-                          {semester}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">취득 평점</label>
-                    <input
-                      value={gradePointInput}
-                      onChange={(e) => setGradePointInput(Number(e.target.value))}
-                      placeholder="4.5"
-                      type="number"
-                      min={0}
-                      max={4.5}
-                      step={0.1}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium uppercase tracking-[0.24em] text-gray-500">이수 학점</label>
-                    <select
-                      value={gradeCreditInput}
-                      onChange={(e) => setGradeCreditInput(Number(e.target.value))}
-                      className="mt-2 w-full rounded-3xl border border-gray-100 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                    >
-                      {[1, 2, 3, 4].map((value) => (
-                        <option key={value} value={value}>
-                          {value}학점
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleAddGradeRecord}
-                  className="mt-2 inline-flex items-center justify-center rounded-3xl bg-gray-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-gray-800"
-                >
-                  학점 추가
+            {/* 시험 범위 */}
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">시험 범위 *</label>
+                <button type="button" onClick={() => setStudyRangeMode((m) => m === "text" ? "checklist" : "text")}
+                  className="text-xs font-semibold text-sky-600 hover:underline">
+                  {studyRangeMode === "text" ? "체크리스트로 전환" : "텍스트로 전환"}
                 </button>
+              </div>
+              {studyRangeMode === "text" ? (
+                <input value={studyRange} onChange={(e) => { setStudyRange(e.target.value); setFormErrors((p) => ({ ...p, studyRange: "" })); }}
+                  placeholder="시험 범위를 입력하세요"
+                  className={`mt-2 w-full rounded-3xl border px-4 py-3 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${formErrors.studyRange ? "border-rose-400 bg-rose-50 dark:bg-rose-950/20 dark:border-rose-600" : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"}`}
+                />
+              ) : (
+                <div className="mt-2 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+                  <div className="space-y-2">
+                    {checklistItems.map((item) => (
+                      <div key={item.id} className="flex items-center gap-2">
+                        <input type="checkbox" checked={item.done}
+                          onChange={() => setChecklistItems((p) => p.map((i) => i.id === item.id ? { ...i, done: !i.done } : i))}
+                          className="h-4 w-4 rounded text-sky-600" />
+                        <span className={`flex-1 text-sm ${item.done ? "line-through text-slate-400" : "text-slate-900 dark:text-slate-100"}`}>{item.text}</span>
+                        <button type="button" onClick={() => setChecklistItems((p) => p.filter((i) => i.id !== item.id))} className="text-slate-400 hover:text-rose-500">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <input value={newCheckItem} onChange={(e) => setNewCheckItem(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && newCheckItem.trim()) {
+                          setChecklistItems((p) => [...p, { id: `${Date.now()}`, text: newCheckItem.trim(), done: false }]);
+                          setNewCheckItem("");
+                        }
+                      }}
+                      placeholder="항목 입력 후 Enter"
+                      className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                  </div>
+                </div>
+              )}
+              {formErrors.studyRange && <p className="mt-1 ml-3 text-xs text-rose-600">{formErrors.studyRange}</p>}
+            </div>
 
-                {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">내 시험 점수</label>
+                <input value={myScoreInput} onChange={(e) => { setMyScoreInput(e.target.value); setFormErrors((p) => ({ ...p, myScore: "" })); }}
+                  placeholder="선택 입력" type="number" min={0} max={100}
+                  className={`mt-2 w-full rounded-3xl border px-4 py-3 text-sm text-slate-900 outline-none dark:text-slate-100 dark:bg-slate-900 ${formErrors.myScore ? "border-rose-400 bg-rose-50 dark:bg-rose-950/20 dark:border-rose-600" : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"}`}
+                />
+                {formErrors.myScore && <p className="mt-1 ml-3 text-xs text-rose-600">{formErrors.myScore}</p>}
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">시험 평균 점수</label>
+                <input value={averageScoreInput} onChange={(e) => { setAverageScoreInput(e.target.value); setFormErrors((p) => ({ ...p, avgScore: "" })); }}
+                  placeholder="선택 입력" type="number" min={0} max={100}
+                  className={`mt-2 w-full rounded-3xl border px-4 py-3 text-sm text-slate-900 outline-none dark:text-slate-100 dark:bg-slate-900 ${formErrors.avgScore ? "border-rose-400 bg-rose-50 dark:bg-rose-950/20 dark:border-rose-600" : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"}`}
+                />
+                {formErrors.avgScore && <p className="mt-1 ml-3 text-xs text-rose-600">{formErrors.avgScore}</p>}
               </div>
             </div>
+
+            {/* 기말 비중 */}
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                기말고사 비중
+                <span className="ml-2 normal-case text-[10px] text-slate-400">(우선순위 보너스 계산에 사용)</span>
+              </label>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {([40, 50, 60, 70] as const).map((pct) => (
+                  <button key={pct} type="button" onClick={() => setFinalWeightPct(pct)}
+                    className={`rounded-full border px-4 py-1.5 text-sm font-semibold transition ${
+                      finalWeightPct === pct
+                        ? pct >= 60 ? "border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
+                          : pct <= 40 ? "border-rose-300 bg-rose-100 text-rose-700 dark:border-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
+                          : "border-sky-300 bg-sky-100 text-sky-700 dark:border-sky-700 dark:bg-sky-950/50 dark:text-sky-300"
+                        : "border-slate-200 text-slate-500 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400"
+                    }`}>
+                    {pct}%
+                    {pct >= 60 ? " +1" : pct <= 40 ? " -1" : " ±0"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button type="button" onClick={handleAdd} disabled={saving}
+              className="inline-flex items-center justify-center rounded-3xl bg-sky-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50">
+              추가하기
+            </button>
           </div>
-        )}
+        </div>
       </section>
 
-      <section className="rounded-[2rem] border border-gray-100 bg-white p-8 shadow-sm">
+      {/* ── 점수 비교 차트 ────────────────────────────────── */}
+      {scoreChartData.length > 0 && (
+        <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">과목별 점수 비교</p>
+          <h2 className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">내 점수 vs 평균</h2>
+          <div className="mt-4 h-[240px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={scoreChartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="내점수" fill="#0ea5e9" radius={[4,4,0,0]} />
+                <Bar dataKey="평균" fill="#cbd5e1" radius={[4,4,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      )}
+
+      {/* ── 목표 GPA 역산 ────────────────────────────────── */}
+      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🎯 목표 GPA 역산</p>
+        <h2 className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">목표 달성을 위한 필요 평점 계산</h2>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          {/* ── 좌측: 입력 ─────────────────────────────────── */}
+          <div className="space-y-6">
+            {/* 목표 GPA 슬라이더 */}
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">목표 GPA</span>
+                <span className="text-2xl font-extrabold tabular-nums text-sky-600 dark:text-sky-400">{targetGpa.toFixed(1)}</span>
+              </div>
+              <input type="range" min={2.0} max={4.5} step={0.1} value={targetGpa}
+                onChange={(e) => setTargetGpa(parseFloat(e.target.value))}
+                className="mt-2 w-full accent-sky-600" />
+              <div className="mt-0.5 flex justify-between text-[10px] text-slate-400 dark:text-slate-500">
+                <span>2.0</span><span>3.0</span><span>3.5</span><span>4.0</span><span>4.5</span>
+              </div>
+            </div>
+
+            {/* 남은 이수 학점 */}
+            <div>
+              <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">앞으로 이수할 학점</span>
+              <div className="mt-2 flex items-center gap-3">
+                <input type="number" min={1} max={200} value={remainCredit}
+                  onChange={(e) => setRemainCredit(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-28 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-center text-sm font-bold text-slate-900 outline-none transition focus:border-sky-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+                <span className="text-sm text-slate-500 dark:text-slate-400">학점</span>
+              </div>
+            </div>
+
+            {/* 현재 이수 정보 요약 */}
+            <div className="space-y-2 rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/50">
+              {[
+                { label: "현재 이수 학점 (점수 입력됨)",     value: `${gpaCalc.scoredCredit}학점` },
+                { label: "총 예상 이수 학점",                value: `${gpaCalc.totalExp}학점` },
+                { label: "현재 GPA",                         value: gpaCalc.currentGpa.toFixed(2), color: "text-sky-600 dark:text-sky-400" },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="flex justify-between text-sm">
+                  <span className="text-slate-500 dark:text-slate-400">{label}</span>
+                  <span className={`font-semibold ${color ?? "text-slate-900 dark:text-slate-100"}`}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ── 우측: 결과 ─────────────────────────────────── */}
+          <div className="space-y-5">
+            {/* 게이지 바: 현재 → 목표 시각화 */}
+            <div>
+              <div className="mb-2 flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                <span>현재 {gpaCalc.currentGpa.toFixed(2)}</span>
+                <span>목표 {targetGpa.toFixed(1)}</span>
+                <span>4.5 만점</span>
+              </div>
+              <div className="relative h-5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                {/* 현재 GPA 막대 */}
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-sky-400 transition-all duration-500 dark:bg-sky-500"
+                  style={{ width: `${gpaCalc.currentPct}%` }}
+                />
+                {/* 목표 GPA 마커 */}
+                <div
+                  className="absolute inset-y-0 w-0.5 bg-amber-500"
+                  style={{ left: `${gpaCalc.targetPct}%` }}
+                />
+              </div>
+              <div className="mt-1 flex justify-between text-[10px] text-slate-400 dark:text-slate-500">
+                <span>0.0</span><span>4.5</span>
+              </div>
+            </div>
+
+            {/* 필요 평점 + 달성 가능 여부 */}
+            <div className={`rounded-2xl border p-5 text-center ${
+              gpaCalc.isImpossible
+                ? "border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/30"
+                : gpaCalc.isEasy
+                ? "border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30"
+                : "border-sky-200 bg-sky-50 dark:border-sky-800 dark:bg-sky-950/30"
+            }`}>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                앞으로 필요한 평균 평점
+              </p>
+              <p className={`mt-2 text-5xl font-extrabold tabular-nums leading-none ${
+                gpaCalc.isImpossible
+                  ? "text-rose-600 dark:text-rose-400"
+                  : gpaCalc.isEasy
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-sky-600 dark:text-sky-400"
+              }`}>
+                {gpaCalc.isImpossible ? "—" : gpaCalc.neededGpa.toFixed(2)}
+              </p>
+              {gpaCalc.isImpossible && (
+                <p className="mt-1 text-xs font-semibold text-rose-500 dark:text-rose-400">(4.5 초과)</p>
+              )}
+              <p className={`mt-2.5 text-sm font-semibold ${
+                gpaCalc.isImpossible
+                  ? "text-rose-700 dark:text-rose-300"
+                  : gpaCalc.isEasy
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : "text-sky-700 dark:text-sky-300"
+              }`}>
+                {gpaCalc.diffMsg}
+              </p>
+            </div>
+
+            {/* 학점별 시나리오 테이블 */}
+            <div className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700">
+              <div className="border-b border-slate-100 bg-slate-50 px-4 py-2.5 dark:border-slate-800 dark:bg-slate-950">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">학점별 최종 GPA 시나리오</p>
+              </div>
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {gpaCalc.scenarios.map(({ label, gp, finalGpa }) => {
+                  const reachTarget = finalGpa >= targetGpa;
+                  return (
+                    <div key={label}
+                      className={`flex items-center justify-between px-4 py-3 ${
+                        reachTarget
+                          ? "bg-emerald-50/50 dark:bg-emerald-950/20"
+                          : "bg-white dark:bg-slate-900"
+                      }`}>
+                      <span className="text-sm text-slate-700 dark:text-slate-300">{label}</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm font-bold text-violet-600 dark:text-violet-400">{gp.toFixed(1)}</span>
+                        <span className={`text-sm font-bold tabular-nums ${
+                          reachTarget ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"
+                        }`}>
+                          {finalGpa.toFixed(2)}
+                        </span>
+                        {reachTarget && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
+                            목표 달성
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── 오늘의 추천 공부 우선순위 ────────────────────── */}
+      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.22em] text-gray-500">🔥 오늘의 추천 공부 우선순위</p>
-            <p className="mt-2 max-w-2xl text-sm text-gray-500">
-              {activeTab === "midterm"
-                ? "중간고사 대비 전공 및 고학점 순으로 우선순위가 매겨집니다."
-                : "기말 평점 방어를 반영한 전략적 추천 과목을 확인하세요."}
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🔥 오늘의 추천 공부 우선순위</p>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+              {activeTab === "midterm" ? "중간고사 대비 전공 및 고학점 순" : "기말 평점 방어를 반영한 전략적 추천"}
             </p>
           </div>
-          <div className="rounded-full bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700">
-            전체 과목 {entries.length}개
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              전체 {entries.length}개
+            </span>
+            <a href="/priority"
+              className="inline-flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700">
+              전용 페이지에서 보기
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+              </svg>
+            </a>
           </div>
         </div>
 
-        <div className="mt-6 space-y-4">
+        <div className="mt-6">
           {loading ? (
-            <LoadingCard />
+            <div className="space-y-4"><SkeletonCard /><SkeletonCard /><SkeletonCard /></div>
           ) : entries.length === 0 ? (
-            <div className="rounded-[1.75rem] border border-gray-100 bg-gray-50 p-8 text-center text-sm text-gray-500">
-              추가된 시험 전략 과목이 없습니다.
+            <div className="flex flex-col items-center gap-4 rounded-[1.75rem] border border-slate-200 bg-slate-50 py-12 text-center dark:border-slate-800 dark:bg-slate-950">
+              <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-slate-300 dark:text-slate-600">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+              </svg>
+              <div>
+                <p className="font-semibold text-slate-700 dark:text-slate-300">아직 등록된 과목이 없어요</p>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">과목을 추가하면 공부 우선순위를 추천해드릴게요!</p>
+              </div>
+            </div>
+          ) : viewMode === "table" ? (
+            <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 dark:bg-slate-950">
+                  <tr>
+                    {["과목명","구분","학점","내 점수","평균","예상 등급","차이","상태",""].map((h) => (
+                      <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                  {sortedEntries.map((item) => {
+                    const diff = item.my_score != null && item.average_score != null ? item.my_score - item.average_score : null;
+                    return (
+                      <tr key={item.id} className={`bg-white dark:bg-slate-900 ${item.is_completed ? "opacity-60" : ""}`}>
+                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-slate-100">{item.subject_name}</td>
+                        <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${item.is_major ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{item.is_major ? "전공" : "교양"}</span></td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400">{item.credits}학점</td>
+                        <td className="px-4 py-3 font-semibold text-sky-600">{item.my_score ?? "—"}</td>
+                        <td className="px-4 py-3 text-slate-500">{item.average_score ?? "—"}</td>
+                        <td className="px-4 py-3 font-bold text-violet-600">{scoreToGradeLetter(item.my_score)}</td>
+                        <td className="px-4 py-3">{diff != null ? <span className={`font-semibold ${diff >= 0 ? "text-emerald-600" : "text-rose-600"}`}>{diff >= 0 ? `+${diff}` : diff}점</span> : "—"}</td>
+                        <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${item.is_completed ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{item.is_completed ? "완료" : "미완료"}</span></td>
+                        <td className="px-4 py-3">
+                          <button type="button" onClick={() => setDeleteConfirmId(item.id)} className="text-xs text-slate-400 hover:text-rose-500">삭제</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           ) : (
-            sortedEntries.map((item) => {
-              const demoted = activeTab === "final" && isFinalDemoted(item);
-              return (
-                <div
-                  key={item.id}
-                  className={`rounded-2xl border border-gray-100 bg-white p-5 transition ${
-                    item.is_completed ? "opacity-80" : "hover:shadow-sm"
-                  }`}
-                >
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0 space-y-3">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <p className={`text-xl font-semibold ${item.is_completed ? "text-gray-400 line-through" : "text-slate-900"}`}>
-                          {item.subject_name}
-                        </p>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            item.is_completed
-                              ? "bg-gray-100 text-gray-500 border border-gray-200"
-                              : item.is_major
-                              ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
-                              : "bg-slate-50 text-slate-700 border border-slate-200"
-                          }`}
-                        >
-                          {item.is_major ? "전공" : "교양"}
-                        </span>
-                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          demoted
-                            ? "bg-pink-50 text-pink-700 border border-pink-100"
-                            : "bg-slate-50 text-slate-600 border border-gray-100"
-                        }`}
-                        >
-                          {demoted ? "하향 조정" : activeTab === "midterm" ? "중간고사 우선" : "기말 전략"}
-                        </span>
+            <div className="space-y-4">
+              {sortedEntries.map((item) => {
+                const demoted     = activeTab === "final" && isFinalDemoted(item);
+                const diff        = item.my_score != null && item.average_score != null ? item.my_score - item.average_score : null;
+                const grade       = scoreToGradeLetter(item.my_score);
+                const pct         = item.my_score != null && item.average_score != null ? estimatePercentile(item.my_score, item.average_score) : null;
+                const isEditing   = editingId === item.id;
+                const priorityScore = (item as any)._score as number ?? 0;
+                const rangeInfo     = (item as any)._range  as ReturnType<typeof classifyStudyRange>;
+                const statusInfo    = (item as any)._status as ReturnType<typeof classifyScoreStatus>;
+
+                return (
+                  <div key={item.id}
+                    className={`overflow-hidden rounded-2xl border transition ${item.is_completed ? "border-slate-200 bg-slate-50 opacity-70 dark:border-slate-800 dark:bg-slate-950" : "border-slate-200 bg-white shadow-sm hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"}`}>
+                    <div className="p-5">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0 flex-1 space-y-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {item.is_completed && <span className="text-emerald-500">✅</span>}
+                            <p className={`text-lg font-semibold ${item.is_completed ? "line-through text-slate-400 dark:text-slate-500" : "text-slate-900 dark:text-slate-100"}`}>
+                              {item.subject_name}
+                            </p>
+                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${item.is_major ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-50 text-slate-600 border-slate-200"}`}>
+                              {item.is_major ? "전공" : "교양"}
+                            </span>
+                            {demoted && <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700">하향 조정</span>}
+                            {grade !== "—" && (
+                              <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-0.5 text-xs font-bold text-violet-700 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300">
+                                예상 {grade}
+                              </span>
+                            )}
+                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${SCORE_STATUS_STYLE[statusInfo.label]}`}>
+                              {statusInfo.label}
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-bold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                              </svg>
+                              P {priorityScore.toFixed(1)}
+                            </span>
+                            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
+                              범위 {rangeInfo.label}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap gap-3">
+                            {isEditing ? (
+                              <>
+                                <input value={editMyScore} onChange={(e) => setEditMyScore(e.target.value)}
+                                  type="number" min={0} max={100} placeholder="내 점수"
+                                  className="w-24 rounded-2xl border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100" />
+                                <input value={editAvgScore} onChange={(e) => setEditAvgScore(e.target.value)}
+                                  type="number" min={0} max={100} placeholder="평균 점수"
+                                  className="w-24 rounded-2xl border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100" />
+                                <button type="button" onClick={() => handleEditSave(item.id)}
+                                  className="rounded-2xl bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-sky-700">저장</button>
+                                <button type="button" onClick={() => setEditingId(null)}
+                                  className="rounded-2xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-400">취소</button>
+                              </>
+                            ) : (
+                              <>
+                                <div className="flex items-center gap-1.5 rounded-2xl bg-slate-50 px-3 py-1.5 text-sm dark:bg-slate-950">
+                                  <span className="text-slate-400">내 점수</span>
+                                  <span className="font-bold text-sky-600">{item.my_score != null ? `${item.my_score}점` : "—"}</span>
+                                  {diff != null && (
+                                    <span className={`ml-1 text-xs font-semibold ${diff >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                                      ({diff >= 0 ? `+${diff}` : diff})
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 rounded-2xl bg-slate-50 px-3 py-1.5 text-sm dark:bg-slate-950">
+                                  <span className="text-slate-400">평균</span>
+                                  <span className="font-bold text-slate-700 dark:text-slate-300">{item.average_score != null ? `${item.average_score}점` : "—"}</span>
+                                </div>
+                                {pct && (
+                                  <div className="rounded-2xl bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 dark:bg-violet-950/50 dark:text-violet-300">
+                                    {pct}
+                                  </div>
+                                )}
+                                <button type="button"
+                                  onClick={() => { setEditingId(item.id); setEditMyScore(String(item.my_score ?? "")); setEditAvgScore(String(item.average_score ?? "")); }}
+                                  className="rounded-2xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-500 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400">
+                                  수정
+                                </button>
+                              </>
+                            )}
+                          </div>
+
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <div className="rounded-2xl bg-slate-50 p-3 text-sm dark:bg-slate-950">
+                              <p className="text-xs font-semibold text-slate-500">학점</p>
+                              <p className="mt-0.5 font-semibold text-slate-900 dark:text-slate-100">{item.credits}학점</p>
+                            </div>
+                            <div className="rounded-2xl bg-slate-50 p-3 text-sm dark:bg-slate-950">
+                              <p className="text-xs font-semibold text-slate-500">시험 범위</p>
+                              <p className="mt-0.5 break-words text-slate-700 dark:text-slate-300 whitespace-pre-line">{item.study_range}</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col items-start gap-2 sm:items-end">
+                          <button type="button" onClick={() => handleToggleCompleted(item.id, item.is_completed)}
+                            className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                              item.is_completed
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-300"
+                                : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                            }`}>
+                            {item.is_completed ? "✅ 완료됨" : "학습 완료"}
+                          </button>
+                          <button type="button" onClick={() => setDeleteConfirmId(item.id)}
+                            className="rounded-full border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-300">
+                            삭제
+                          </button>
+                        </div>
                       </div>
-
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        <div className="rounded-3xl bg-gray-50 p-3 text-sm text-gray-600">
-                          <p className="font-semibold text-slate-900">학점</p>
-                          <p className="mt-1">{item.credits}학점</p>
-                        </div>
-                        <div className="rounded-3xl bg-gray-50 p-3 text-sm text-gray-600">
-                          <p className="font-semibold text-slate-900">시험 범위</p>
-                          <p className="mt-1 break-words">{item.study_range}</p>
-                        </div>
-                      </div>
-
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        <div className="rounded-3xl bg-gray-50 p-3 text-sm text-gray-600">
-                          <p className="font-semibold text-slate-900">내 점수</p>
-                          <p className="mt-1">{item.my_score != null ? `${item.my_score}점` : "미입력"}</p>
-                        </div>
-                        <div className="rounded-3xl bg-gray-50 p-3 text-sm text-gray-600">
-                          <p className="font-semibold text-slate-900">평균 점수</p>
-                          <p className="mt-1">{item.average_score != null ? `${item.average_score}점` : "미입력"}</p>
-                        </div>
-                      </div>
-
-                      <p className="rounded-3xl bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                        {getStrategyMessage(item, activeTab)}
-                      </p>
-                    </div>
-
-                    <div className="flex flex-col items-start gap-3 sm:items-end">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleCompleted(item.id, item.is_completed)}
-                        className={`inline-flex items-center rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                          item.is_completed
-                            ? "border-gray-200 bg-white text-gray-600 hover:border-gray-300"
-                            : "border-gray-100 bg-gray-50 text-gray-700 hover:border-gray-200"
-                        }`}
-                      >
-                        {item.is_completed ? "완료 처리됨" : "학습 완료"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(item.id)}
-                        className="inline-flex items-center gap-2 rounded-full text-sm font-semibold text-gray-400 transition hover:text-gray-700"
-                      >
-                        <span aria-hidden="true">🗑️</span>
-                        삭제
-                      </button>
                     </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           )}
         </div>
       </section>
+
+      {/* ── 삭제 확인 모달 ────────────────────────────────── */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-2xl dark:bg-slate-900">
+            <div className="flex flex-col items-center gap-4 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-50 dark:bg-rose-950/40">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-rose-600 dark:text-rose-400">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">삭제하시겠어요?</h2>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">이 과목 데이터가 영구 삭제됩니다.</p>
+              </div>
+              <div className="flex w-full gap-3">
+                <button type="button" onClick={() => setDeleteConfirmId(null)}
+                  className="flex-1 rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                  취소
+                </button>
+                <button type="button" onClick={() => handleDelete(deleteConfirmId)} disabled={saving}
+                  className="flex-1 rounded-3xl bg-rose-600 py-3 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:opacity-50">
+                  삭제
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toastMessage ? <ToastMessage message={toastMessage} type={toastType} onClose={() => setToastMessage(null)} /> : null}
     </div>
   );

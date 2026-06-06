@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* class-based dark mode: dark: utilities respond to .dark on html */
+@custom-variant dark (&:is(.dark *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

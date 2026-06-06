@@ -50,7 +50,7 @@ export async function createPlannerItem(item: { user_id?: string; title: string;
     logSupabaseError("createPlannerItem missing user", authResult.error);
     return { data: null, error: authResult.error };
   }
-  return supabase.from("planner_tasks").insert([{ ...item, user_id: authResult.data, is_completed: false }]);
+  return supabase.from("planner_tasks").insert([{ ...item, user_id: authResult.data, is_completed: false }]).select();
 }
 
 export async function deletePlannerItem(id: string) {
@@ -227,12 +227,17 @@ export async function createExamStrategy(item: {
       average_score: item.average_score ?? null,
       is_completed: false,
     },
-  ]);
+  ]).select();
 }
 
 export async function toggleExamStrategyCompleted(id: string, is_completed: boolean) {
   if (!supabase) return noClient("Supabase client is not initialized.");
   return supabase.from("exam_strategies").update({ is_completed }).eq("id", id);
+}
+
+export async function updateExamStrategyScores(id: string, my_score: number | null, average_score: number | null) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("exam_strategies").update({ my_score, average_score }).eq("id", id);
 }
 
 export async function deleteExamStrategy(id: string) {
@@ -314,22 +319,12 @@ export async function listArchiveFiles(bucket: string) {
   return supabase.storage.from(bucket).list("", { limit: 100 });
 }
 
-export async function uploadArchiveFile(bucket: string, filePath: string, file: File, progressCallback?: (progress: number) => void) {
+export async function uploadArchiveFile(bucket: string, filePath: string, file: File) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  const uploadOptions = {
+  return supabase.storage.from(bucket).upload(filePath, file, {
     cacheControl: "3600",
-    upsert: false,
-  } as any;
-
-  if (progressCallback) {
-    uploadOptions.onUploadProgress = (event: any) => {
-      if (event.total) {
-        progressCallback(Math.round((event.loaded / event.total) * 100));
-      }
-    };
-  }
-
-  return supabase.storage.from(bucket).upload(filePath, file, uploadOptions);
+    upsert: true,
+  });
 }
 
 export async function deleteArchiveFile(bucket: string, filePath: string) {
@@ -337,13 +332,31 @@ export async function deleteArchiveFile(bucket: string, filePath: string) {
   return supabase.storage.from(bucket).remove([filePath]);
 }
 
-export async function getCommunityPosts(category: string) {
+export async function getCommunityPosts(category: string, search?: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase
+  let query = supabase
     .from("community_posts")
     .select("*")
     .eq("category", category)
     .order("created_at", { ascending: false });
+  if (search?.trim()) {
+    const q = `%${search.trim()}%`;
+    query = query.or(`title.ilike.${q},content.ilike.${q}`);
+  }
+  return query;
+}
+
+export async function updateCommunityPost(
+  id: string,
+  item: { title: string; content: string; file_url?: string | null; file_name?: string | null },
+) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("community_posts").update(item).eq("id", id);
+}
+
+export async function deleteCommunityPost(id: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("community_posts").delete().eq("id", id);
 }
 
 export async function createCommunityPost(item: {
@@ -471,4 +484,59 @@ export async function sendPasswordResetEmail(email: string) {
   return supabase.auth.resetPasswordForEmail(email, {
     redirectTo: window.location.origin,
   });
+}
+
+// ── Post Likes ───────────────────────────────────────────────────────────────
+
+export async function getPostLikes(postIds: string[]) {
+  if (!supabase || postIds.length === 0) return { data: [] as { post_id: string; user_id: string }[], error: null };
+  return supabase.from("post_likes").select("post_id, user_id").in("post_id", postIds);
+}
+
+export async function addPostLike(postId: string, userId: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("post_likes").insert({ post_id: postId, user_id: userId });
+}
+
+export async function removePostLike(postId: string, userId: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("post_likes").delete().eq("post_id", postId).eq("user_id", userId);
+}
+
+// ── Comments ─────────────────────────────────────────────────────────────────
+
+export async function getCommentsByPost(postId: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("comments").select("*").eq("post_id", postId).order("created_at", { ascending: true });
+}
+
+export async function createComment(item: { post_id: string; user_id: string; author_name: string; content: string }) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("comments").insert([item]).select();
+}
+
+export async function deleteComment(id: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("comments").delete().eq("id", id);
+}
+
+export async function getCommentCountsByPosts(postIds: string[]) {
+  if (!supabase || postIds.length === 0) return { data: [] as { post_id: string }[], error: null };
+  return supabase.from("comments").select("post_id").in("post_id", postIds);
+}
+
+// ── Avatar ────────────────────────────────────────────────────────────────────
+
+export async function uploadAvatar(path: string, file: File) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.storage.from("avatars").upload(path, file, { cacheControl: "3600", upsert: true });
+}
+
+export function getAvatarPublicUrl(path: string): string {
+  if (!supabase) return "";
+  return supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
+}
+
+export async function updateProfileAvatarUrl(userId: string, avatarUrl: string) {
+  return runProfileQuery((table) => supabase!.from(table).update({ avatar_url: avatarUrl }).eq("id", userId));
 }
