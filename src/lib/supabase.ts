@@ -107,6 +107,41 @@ export async function createExamEvent(item: {
   ]);
 }
 
+export async function createStudyCalendarEvent(item: {
+  user_id?: string;
+  subject_name: string;
+  task: string;
+  study_date: string;
+  duration: number;
+}) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  const authResult = await getAuthenticatedUserId(item.user_id);
+  if (authResult.error) {
+    logSupabaseError("createStudyCalendarEvent missing user", authResult.error);
+    return { data: null, error: authResult.error };
+  }
+  return supabase.from("exam_events").insert([{
+    user_id: authResult.data,
+    subject_name: item.subject_name,
+    exam_type: "study",
+    exam_date: item.study_date,
+    exam_range: item.task,
+    notes: `${item.duration}분`,
+    created_at: new Date().toISOString(),
+  }]);
+}
+
+export async function getStudyPlansForDate(userId: string, date: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase
+    .from("exam_events")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("exam_type", "study")
+    .eq("exam_date", date)
+    .order("created_at", { ascending: true });
+}
+
 export async function getUserTimetableSubjects(userId: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
   return supabase
@@ -489,13 +524,13 @@ export async function sendPasswordResetEmail(email: string) {
 // ── Post Likes ───────────────────────────────────────────────────────────────
 
 export async function getPostLikes(postIds: string[]) {
-  if (!supabase || postIds.length === 0) return { data: [] as { post_id: string; user_id: string }[], error: null };
-  return supabase.from("post_likes").select("post_id, user_id").in("post_id", postIds);
+  if (!supabase || postIds.length === 0) return { data: [] as { post_id: string; user_id: string; type: string }[], error: null };
+  return supabase.from("post_likes").select("post_id, user_id, type").in("post_id", postIds);
 }
 
-export async function addPostLike(postId: string, userId: string) {
+export async function addPostLike(postId: string, userId: string, type: "like" | "dislike" = "like") {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("post_likes").insert({ post_id: postId, user_id: userId });
+  return supabase.from("post_likes").insert({ post_id: postId, user_id: userId, type });
 }
 
 export async function removePostLike(postId: string, userId: string) {

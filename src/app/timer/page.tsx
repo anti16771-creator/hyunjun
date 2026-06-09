@@ -8,7 +8,7 @@ import {
 import LoadingCard from "@/src/components/LoadingCard";
 import ToastMessage from "@/src/components/ToastMessage";
 import { useAuth } from "@/src/context/AuthContext";
-import { createStudyLog, deleteStudyLog, getStudyLogs, getUserTimetableSubjects } from "@/src/lib/supabase";
+import { createStudyLog, deleteStudyLog, getStudyLogs, getStudyPlansForDate, getUserTimetableSubjects } from "@/src/lib/supabase";
 
 const DEFAULT_FOCUS_SECS = 25 * 60;
 const DEFAULT_BREAK_SECS =  5 * 60;
@@ -97,6 +97,7 @@ function SkeletonRow() {
 }
 
 type LogItem = { id: string; date: string; minutes: number; subject: string; duration_seconds?: number; created_at?: string };
+type StudyPlanItem = { id: string; subject_name: string; exam_range: string; notes: string; exam_date: string };
 
 export default function TimerPage() {
   const { user, loading: authLoading } = useAuth();
@@ -122,6 +123,7 @@ export default function TimerPage() {
   const [showCompletionModal, setShowCompletionModal]     = useState(false);
   const [toastMessage, setToastMessage]                   = useState<string|null>(null);
   const [toastType, setToastType]                         = useState<"success"|"error">("success");
+  const [studyPlans, setStudyPlans]                       = useState<StudyPlanItem[]>([]);
 
   // ─── 히스토리 필터 상태 ───────────────────────────────────────────────────
   const [historySubjectFilter, setHistorySubjectFilter]   = useState("전체");
@@ -177,7 +179,13 @@ export default function TimerPage() {
     setLoading(false);
   };
 
-  useEffect(() => { if (!user) return; fetchSubjects(); fetchLogs(); }, [user]);
+  const fetchStudyPlans = async () => {
+    if (!user) return;
+    const res = await getStudyPlansForDate(user.id, formatDateKey(new Date()));
+    setStudyPlans(res.error ? [] : ((res.data ?? []) as StudyPlanItem[]));
+  };
+
+  useEffect(() => { if (!user) return; fetchSubjects(); fetchLogs(); fetchStudyPlans(); }, [user]);
 
   // ─── Guards & shortcuts ───────────────────────────────────────────────────
   useEffect(() => {
@@ -565,6 +573,37 @@ export default function TimerPage() {
           </div>
         </div>
       </div>
+
+      {/* ── 오늘의 공부 계획 ─────────────────────────────── */}
+      {studyPlans.length > 0 && (
+        <section className="rounded-[2rem] bg-white p-5 shadow-sm dark:bg-slate-900">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-500 dark:text-emerald-400">오늘의 공부 계획</p>
+          <h2 className="mt-0.5 text-base font-semibold text-slate-900 dark:text-slate-100">AI 추천 학습 일정</h2>
+          <div className="mt-4 space-y-3">
+            {studyPlans.map((plan) => (
+              <div key={plan.id}
+                className="flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/40 dark:bg-emerald-950/30">
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold text-slate-900 dark:text-slate-100 truncate">{plan.subject_name}</p>
+                  <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400 truncate">{plan.exam_range}</p>
+                </div>
+                <span className="shrink-0 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300">
+                  {plan.notes}
+                </span>
+                <button type="button"
+                  onClick={() => {
+                    setSubjects((prev) => prev.includes(plan.subject_name) ? prev : [...prev, plan.subject_name]);
+                    setSelectedSubject(plan.subject_name);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                  className="shrink-0 rounded-3xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">
+                  타이머 시작
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── 차트 2열 ──────────────────────────────────────── */}
       <div className="grid gap-4 lg:grid-cols-2">

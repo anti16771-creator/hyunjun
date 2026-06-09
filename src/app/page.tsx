@@ -387,23 +387,23 @@ export default function Home() {
       <div className="space-y-6">
 
         {/* ── 상단 요약 카드 ──────────────────────────────── */}
-        <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🏠 홈 대시보드</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🏠 홈 대시보드</p>
               {localProfile.nickname && (
-                <p className="mt-1 text-base font-semibold text-slate-700 dark:text-slate-300">
+                <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-300">
                   안녕하세요, {localProfile.nickname}님 👋
                 </p>
               )}
-              <h1 className="mt-0.5 text-2xl font-semibold text-slate-900 dark:text-slate-100">학습 일정과 집중 시간을 한눈에</h1>
+              <h1 className="mt-0.5 text-xl font-semibold text-slate-900 dark:text-slate-100">학습 일정과 집중 시간을 한눈에</h1>
             </div>
-            <div className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+            <div className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
               오늘 {todayKey}
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
             <MetricCard
               label="오늘 수업" value={`${todayClasses}개`}
               description={todayClasses > 0 ? "주간 시간표를 기반으로 자동 집계됩니다." : undefined}

@@ -51,6 +51,13 @@ function formatTimeAgo(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString("ko-KR");
 }
 
+function getFileType(fileName: string): "image" | "pdf" | "other" {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
+  if (ext === "pdf") return "pdf";
+  return "other";
+}
+
 function sanitizeFileName(filename: string) {
   const ts = Date.now();
   const lastDot = filename.lastIndexOf(".");
@@ -89,10 +96,17 @@ export default function CommunityPage() {
   const [uploading, setUploading]                 = useState(false);
   const [formError, setFormError]                 = useState("");
 
-  // ─── 좋아요 ───────────────────────────────────────────────────────────────
-  const [likeCounts,   setLikeCounts]   = useState<Record<string, number>>({});
-  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(new Set());
-  const [likeLoading,  setLikeLoading]  = useState<Record<string, boolean>>({});
+  // ─── 좋아요 / 싫어요 ──────────────────────────────────────────────────────
+  const [likeCounts,      setLikeCounts]      = useState<Record<string, number>>({});
+  const [dislikeCounts,   setDislikeCounts]   = useState<Record<string, number>>({});
+  const [likedPostIds,    setLikedPostIds]    = useState<Set<string>>(new Set());
+  const [dislikedPostIds, setDislikedPostIds] = useState<Set<string>>(new Set());
+  const [likeLoading,     setLikeLoading]     = useState<Record<string, boolean>>({});
+
+  // ─── 첨부 파일 미리보기 ───────────────────────────────────────────────────
+  const [previewModal,      setPreviewModal]      = useState<{ url: string; fileName: string; fileType: "image" | "other" } | null>(null);
+  const [previewLoading,    setPreviewLoading]    = useState(false);
+  const [attachmentThumbUrl, setAttachmentThumbUrl] = useState<string | null>(null);
 
   // ─── 댓글 ─────────────────────────────────────────────────────────────────
   const [comments,       setComments]       = useState<Comment[]>([]);
@@ -131,7 +145,7 @@ export default function CommunityPage() {
     return isAdmin || post.user_id === user.id;
   }, [user, isAdmin]);
 
-  // ─── 인터랙션(좋아요·댓글 수) 로드 ─────────────────────────────────────
+  // ─── 인터랙션(좋아요·싫어요·댓글 수) 로드 ──────────────────────────────
   const loadPostInteractions = useCallback(async (postIds: string[]) => {
     if (postIds.length === 0) return;
     const [likesRes, countRes] = await Promise.all([
@@ -139,14 +153,23 @@ export default function CommunityPage() {
       getCommentCountsByPosts(postIds),
     ]);
     if (!likesRes.error && likesRes.data) {
-      const counts: Record<string, number> = {};
-      const liked  = new Set<string>();
-      (likesRes.data as { post_id: string; user_id: string }[]).forEach(({ post_id, user_id: uid }) => {
-        counts[post_id] = (counts[post_id] ?? 0) + 1;
-        if (uid === user?.id) liked.add(post_id);
+      const likeCts: Record<string, number> = {};
+      const dislikeCts: Record<string, number> = {};
+      const liked = new Set<string>();
+      const disliked = new Set<string>();
+      (likesRes.data as { post_id: string; user_id: string; type: string }[]).forEach(({ post_id, user_id: uid, type }) => {
+        if (type === "dislike") {
+          dislikeCts[post_id] = (dislikeCts[post_id] ?? 0) + 1;
+          if (uid === user?.id) disliked.add(post_id);
+        } else {
+          likeCts[post_id] = (likeCts[post_id] ?? 0) + 1;
+          if (uid === user?.id) liked.add(post_id);
+        }
       });
-      setLikeCounts(counts);
+      setLikeCounts(likeCts);
+      setDislikeCounts(dislikeCts);
       setLikedPostIds(liked);
+      setDislikedPostIds(disliked);
     }
     if (!countRes.error && countRes.data) {
       const counts: Record<string, number> = {};
@@ -303,25 +326,66 @@ export default function CommunityPage() {
     setCommentText("");
   }, [selectedPost?.id, loadComments]);
 
+  // ─── 이미지 첨부파일 썸네일 URL 로드 ────────────────────────────────────
+  useEffect(() => {
+    if (!selectedPost?.file_url || !selectedPost.file_name || getFileType(selectedPost.file_name) !== "image") {
+      setAttachmentThumbUrl(null);
+      return;
+    }
+    getSignedAttachmentUrl("board_attachments", selectedPost.file_url).then((res) => {
+      setAttachmentThumbUrl(!res.error && res.data?.signedUrl ? res.data.signedUrl : null);
+    });
+  }, [selectedPost?.id, selectedPost?.file_url]);
+
   // 유저 변경 시 좋아요 상태 갱신
   useEffect(() => {
     if (posts.length > 0) loadPostInteractions(posts.map((p) => p.id));
   }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── 좋아요 토글 ─────────────────────────────────────────────────────────
-  const handleToggleLike = async (postId: string) => {
+  // ─── 좋아요 / 싫어요 토글 ───────────────────────────────────────────────
+  const handleToggleReaction = async (postId: string, reactionType: "like" | "dislike") => {
     if (!user) { showToast("로그인 후 좋아요를 누를 수 있습니다.", "error"); return; }
     if (likeLoading[postId]) return;
-    const wasLiked = likedPostIds.has(postId);
-    setLikedPostIds((prev) => { const n = new Set(prev); wasLiked ? n.delete(postId) : n.add(postId); return n; });
-    setLikeCounts((prev) => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 0) + (wasLiked ? -1 : 1)) }));
-    setLikeLoading((prev) => ({ ...prev, [postId]: true }));
-    const res = wasLiked ? await removePostLike(postId, user.id) : await addPostLike(postId, user.id);
-    setLikeLoading((prev) => ({ ...prev, [postId]: false }));
-    if (res.error) {
-      setLikedPostIds((prev) => { const n = new Set(prev); wasLiked ? n.add(postId) : n.delete(postId); return n; });
-      setLikeCounts((prev) => ({ ...prev, [postId]: (prev[postId] ?? 0) + (wasLiked ? 1 : -1) }));
+
+    const wasLiked    = likedPostIds.has(postId);
+    const wasDisliked = dislikedPostIds.has(postId);
+    const isLike      = reactionType === "like";
+    const isActive    = isLike ? wasLiked : wasDisliked;
+    const otherActive = isLike ? wasDisliked : wasLiked;
+
+    // Optimistic UI update
+    if (isLike) {
+      setLikedPostIds((prev) => { const n = new Set(prev); isActive ? n.delete(postId) : n.add(postId); return n; });
+      setLikeCounts((prev) => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 0) + (isActive ? -1 : 1)) }));
+      if (otherActive) {
+        setDislikedPostIds((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+        setDislikeCounts((prev) => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 0) - 1) }));
+      }
+    } else {
+      setDislikedPostIds((prev) => { const n = new Set(prev); isActive ? n.delete(postId) : n.add(postId); return n; });
+      setDislikeCounts((prev) => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 0) + (isActive ? -1 : 1)) }));
+      if (otherActive) {
+        setLikedPostIds((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+        setLikeCounts((prev) => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 0) - 1) }));
+      }
     }
+
+    setLikeLoading((prev) => ({ ...prev, [postId]: true }));
+
+    let hadError = false;
+    // Remove any existing reaction first
+    if (wasLiked || wasDisliked) {
+      const res = await removePostLike(postId, user.id);
+      if (res.error) hadError = true;
+    }
+    // Add new reaction unless toggling off
+    if (!isActive && !hadError) {
+      const res = await addPostLike(postId, user.id, reactionType);
+      if (res.error) hadError = true;
+    }
+
+    setLikeLoading((prev) => ({ ...prev, [postId]: false }));
+    if (hadError) loadPostInteractions(posts.map((p) => p.id));
   };
 
   // ─── 댓글 추가 ───────────────────────────────────────────────────────────
@@ -362,18 +426,24 @@ export default function CommunityPage() {
     setDeleting(false);
   };
 
-  // ─── 파일 다운로드 / 링크 복사 ───────────────────────────────────────────
+  // ─── 파일 다운로드 / 미리보기 ────────────────────────────────────────────
   const handleDownloadFile = async (filePath: string) => {
     const res = await getSignedAttachmentUrl("board_attachments", filePath);
     if (res.error || !res.data?.signedUrl) { showToast("파일을 가져오지 못했습니다.", "error"); return; }
     window.open(res.data.signedUrl, "_blank");
   };
 
-  const handleCopyLink = async (filePath: string) => {
+  const handlePreviewFile = async (filePath: string, fileName: string) => {
+    setPreviewLoading(true);
     const res = await getSignedAttachmentUrl("board_attachments", filePath);
-    if (res.error || !res.data?.signedUrl) { showToast("링크 생성에 실패했습니다.", "error"); return; }
-    await navigator.clipboard.writeText(res.data.signedUrl);
-    showToast("링크가 클립보드에 복사되었습니다.", "success");
+    setPreviewLoading(false);
+    if (res.error || !res.data?.signedUrl) { showToast("파일을 가져오지 못했습니다.", "error"); return; }
+    const fileType = getFileType(fileName);
+    if (fileType === "pdf") {
+      window.open(res.data.signedUrl, "_blank");
+      return;
+    }
+    setPreviewModal({ url: res.data.signedUrl, fileName, fileType: fileType === "image" ? "image" : "other" });
   };
 
   // ─── 관리자 권한 관리 ─────────────────────────────────────────────────────
@@ -410,12 +480,12 @@ export default function CommunityPage() {
   return (
     <div className="space-y-6">
       {/* ── 헤더 ──────────────────────────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">💬 커뮤니티</p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">Smart Grade 게시판</h1>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">자유로운 게시글, 자료 공유, 꿀팁을 나눠요.</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">💬 커뮤니티</p>
+            <h1 className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">Smart Grade 게시판</h1>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">자유로운 게시글, 자료 공유, 꿀팁을 나눠요.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {isStrictAdmin && (
@@ -629,6 +699,16 @@ export default function CommunityPage() {
                   {selectedPost.file_url && (
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
                       <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">첨부 파일</p>
+                      {attachmentThumbUrl && (
+                        <div className="mt-3">
+                          <img
+                            src={attachmentThumbUrl}
+                            alt={selectedPost.file_name ?? "첨부 이미지"}
+                            className="max-h-48 cursor-pointer rounded-xl border border-slate-200 object-contain transition hover:opacity-90 dark:border-slate-700"
+                            onClick={() => setPreviewModal({ url: attachmentThumbUrl, fileName: selectedPost.file_name!, fileType: "image" })}
+                          />
+                        </div>
+                      )}
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <span className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">
                           📎 {selectedPost.file_name ?? "첨부파일"}
@@ -637,19 +717,23 @@ export default function CommunityPage() {
                           className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
                           다운로드
                         </button>
-                        <button type="button" onClick={() => handleCopyLink(selectedPost.file_url!)}
-                          className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:bg-transparent dark:text-slate-400">
-                          링크 복사
+                        <button
+                          type="button"
+                          onClick={() => handlePreviewFile(selectedPost.file_url!, selectedPost.file_name ?? "첨부파일")}
+                          disabled={previewLoading}
+                          className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-transparent dark:text-slate-400"
+                        >
+                          {previewLoading ? "로딩 중..." : "미리보기"}
                         </button>
                       </div>
                     </div>
                   )}
 
-                  {/* ── 좋아요 ─────────────────────────────────────── */}
-                  <div className="flex items-center gap-4">
+                  {/* ── 좋아요 / 싫어요 ─────────────────────────── */}
+                  <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => handleToggleLike(selectedPost.id)}
+                      onClick={() => handleToggleReaction(selectedPost.id, "like")}
                       disabled={likeLoading[selectedPost.id]}
                       className={`flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-semibold transition disabled:opacity-60 ${
                         likedPostIds.has(selectedPost.id)
@@ -660,9 +744,28 @@ export default function CommunityPage() {
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
                         fill={likedPostIds.has(selectedPost.id) ? "currentColor" : "none"}
                         stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                        <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/>
+                        <path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
                       </svg>
                       좋아요 {likeCounts[selectedPost.id] ?? 0}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleReaction(selectedPost.id, "dislike")}
+                      disabled={likeLoading[selectedPost.id]}
+                      className={`flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-semibold transition disabled:opacity-60 ${
+                        dislikedPostIds.has(selectedPost.id)
+                          ? "border-blue-300 bg-blue-50 text-blue-600 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-400"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:text-blue-500 dark:border-slate-700 dark:bg-transparent dark:text-slate-400"
+                      }`}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+                        fill={dislikedPostIds.has(selectedPost.id) ? "currentColor" : "none"}
+                        stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"/>
+                        <path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+                      </svg>
+                      싫어요 {dislikeCounts[selectedPost.id] ?? 0}
                     </button>
                     <span className="text-sm text-slate-400 dark:text-slate-500">💬 댓글 {commentCounts[selectedPost.id] ?? 0}</span>
                   </div>
@@ -937,6 +1040,70 @@ export default function CommunityPage() {
               {manageMessage && <p className="text-sm text-slate-700 dark:text-slate-300">{manageMessage}</p>}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── 첨부 파일 미리보기 모달 ─────────────────────── */}
+      {previewModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setPreviewModal(null)}
+        >
+          {previewModal.fileType === "image" ? (
+            <div className="relative flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-3 flex w-full items-center justify-between">
+                <span className="max-w-xs truncate text-xs text-white/70">{previewModal.fileName}</span>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModal(null)}
+                  className="ml-4 rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
+                >
+                  닫기 ✕
+                </button>
+              </div>
+              <img
+                src={previewModal.url}
+                alt={previewModal.fileName}
+                className="max-h-[80vh] max-w-[88vw] rounded-2xl object-contain shadow-2xl"
+              />
+            </div>
+          ) : (
+            <div
+              className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-2xl dark:bg-slate-900"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex flex-col items-center gap-4 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-100 text-3xl dark:bg-slate-800">
+                  📄
+                </div>
+                <div>
+                  <p className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-xs">
+                    {previewModal.fileName}
+                  </p>
+                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                    이 파일 형식은 미리보기를 지원하지 않습니다.
+                  </p>
+                </div>
+                <div className="flex w-full gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewModal(null)}
+                    className="flex-1 rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    닫기
+                  </button>
+                  <a
+                    href={previewModal.url}
+                    download={previewModal.fileName}
+                    className="flex-1 rounded-3xl bg-sky-600 py-3 text-center text-sm font-semibold text-white transition hover:bg-sky-700"
+                    onClick={() => setPreviewModal(null)}
+                  >
+                    다운로드
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

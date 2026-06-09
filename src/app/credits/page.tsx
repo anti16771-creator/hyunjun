@@ -193,13 +193,13 @@ export default function CreditsPage() {
   return (
     <div className="space-y-6">
       {/* ── 헤더 + 학기 탭 + 입력 폼 ──────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+      <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
 
         {/* 타이틀 행 */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🎓 학점 관리</p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">GPA · 졸업학점 관리</h1>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🎓 학점 관리</p>
+            <h1 className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">GPA · 졸업학점 관리</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {/* 뷰 모드 토글 */}
@@ -224,18 +224,18 @@ export default function CreditsPage() {
         </div>
 
         {/* GPA 요약 카드 3개 */}
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-4 grid grid-cols-3 gap-2">
           {/* 누적 GPA + 게이지 */}
-          <div className="col-span-3 rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-950 sm:col-span-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">누적 GPA</p>
+          <div className="col-span-3 rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-950 sm:col-span-1">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">누적 GPA</p>
             {cumGpaNum === 0 ? (
-              <p className="mt-2 text-sm text-slate-400 dark:text-slate-500">아직 성적 데이터가 없어요</p>
+              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">아직 성적 데이터가 없어요</p>
             ) : (
               <>
-                <p className={`mt-1 text-3xl font-bold ${gpaColor(cumGpaNum)}`}>{cumGpaNum.toFixed(2)}</p>
-                <div className="mt-3">
+                <p className={`mt-1 text-2xl font-bold ${gpaColor(cumGpaNum)}`}>{cumGpaNum.toFixed(2)}</p>
+                <div className="mt-2">
                   <div className="flex justify-between text-[10px] text-slate-400 mb-1"><span>0.0</span><span>4.5</span></div>
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                     <div className="h-full rounded-full bg-sky-500 transition-all duration-500" style={{ width: `${gaugePct}%` }} />
                   </div>
                 </div>
@@ -244,24 +244,24 @@ export default function CreditsPage() {
           </div>
 
           {/* 이번 학기 GPA */}
-          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">이번 학기 GPA</p>
-            <p className={`mt-1 text-3xl font-bold ${activeSemGpa != null ? gpaColor(activeSemGpa) : "text-slate-400 dark:text-slate-500"}`}>
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 text-center dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">이번 학기 GPA</p>
+            <p className={`mt-1 text-2xl font-bold ${activeSemGpa != null ? gpaColor(activeSemGpa) : "text-slate-400 dark:text-slate-500"}`}>
               {activeSemGpa != null ? activeSemGpa.toFixed(2) : "—"}
             </p>
-            <p className="mt-1 text-xs text-slate-400">{activeSemInfo.label}</p>
+            <p className="mt-1 text-[10px] text-slate-400">{activeSemInfo.label}</p>
           </div>
 
           {/* 총 이수 학점 */}
-          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">총 이수 학점</p>
-            <p className="mt-1 text-3xl font-bold text-slate-900 dark:text-slate-100">{totalCredits}</p>
-            <p className="mt-1 text-xs text-slate-400">학점</p>
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 text-center dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">총 이수 학점</p>
+            <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">{totalCredits}</p>
+            <p className="mt-1 text-[10px] text-slate-400">학점</p>
           </div>
         </div>
 
         {/* 학기 탭 8개 (가로 스크롤) */}
-        <div className="mt-6 overflow-x-auto pb-1">
+        <div className="mt-4 overflow-x-auto pb-1">
           <div className="flex min-w-max gap-1 rounded-2xl bg-slate-100 p-1.5 dark:bg-slate-800">
             {SEMESTER_TABS.map((tab) => {
               const records = gradeRecords.filter((r) => r.year === tab.year && r.semester === tab.sem);

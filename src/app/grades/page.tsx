@@ -17,6 +17,7 @@ import ToastMessage from "@/src/components/ToastMessage";
 import { useAuth } from "@/src/context/AuthContext";
 import {
   createExamStrategy,
+  createStudyCalendarEvent,
   deleteExamStrategy,
   getExamStrategies,
   getUserTimetableSubjects,
@@ -41,6 +42,8 @@ type ExamEntry = {
   is_completed: boolean;
   created_at?: string;
 };
+
+type StudyPlan = { date: string; task: string; duration: number };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function scoreToGradePoint(score?: number | null) {
@@ -122,6 +125,26 @@ function calcGapDeduction(myScore: number | null, avgScore: number | null): numb
   if (gap <= 0)  return  0;
   if (gap <= 15) return -1;
   return 4;
+}
+
+// ─── Midterm/Final weight helpers ─────────────────────────────────────────────
+const SUBJECT_WEIGHTS_KEY = "smartgrade_subject_weights";
+type SubjectWeight = { midWeightPct: number };
+
+function loadSubjectWeights(): Record<string, SubjectWeight> {
+  try { return JSON.parse(localStorage.getItem(SUBJECT_WEIGHTS_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+function calcWeightedScore(midScore: number | null, finalScore: number | null, midPct: number): number | null {
+  if (midScore == null || finalScore == null) return null;
+  return Math.round((midScore * midPct + finalScore * (100 - midPct)) / 100 * 10) / 10;
+}
+
+function calcNeededFinalScore(targetScore: number, midScore: number, midPct: number): number | null {
+  const finPct = 100 - midPct;
+  if (finPct === 0) return null;
+  return Math.round((targetScore * 100 - midScore * midPct) / finPct * 10) / 10;
 }
 
 function calcPriorityScore(item: ExamEntry, finalWeightPct: number): number {
@@ -214,9 +237,11 @@ function Confetti() {
 export default function GradesPage() {
   const { user, loading: authLoading } = useAuth();
 
-  const [activeTab, setActiveTab]   = useState<ExamType>("midterm");
-  const [viewMode, setViewMode]     = useState<ViewMode>("grid");
-  const [entries, setEntries]       = useState<ExamEntry[]>([]);
+  const [activeTab, setActiveTab]       = useState<ExamType>("midterm");
+  const [viewMode, setViewMode]         = useState<ViewMode>("grid");
+  const [midtermEntries, setMidtermEntries] = useState<ExamEntry[]>([]);
+  const [finalEntries, setFinalEntries]     = useState<ExamEntry[]>([]);
+  const [subjectWeights, setSubjectWeights] = useState<Record<string, SubjectWeight>>({});
   const [timetableSubjects, setTimetableSubjects] = useState<string[]>([]);
 
   // Strategy form
@@ -230,7 +255,8 @@ export default function GradesPage() {
   const [newCheckItem, setNewCheckItem]       = useState("");
   const [myScoreInput, setMyScoreInput]       = useState("");
   const [averageScoreInput, setAverageScoreInput] = useState("");
-  const [finalWeightPct, setFinalWeightPct]   = useState(50);
+  const [midWeightPct, setMidWeightPct]       = useState(40);
+  const finalWeightPct = 100 - midWeightPct;
   const [formErrors, setFormErrors]           = useState<Record<string, string>>({});
   const [entryMeta, setEntryMeta]             = useState<Record<string, EntryMeta>>({});
 
@@ -240,10 +266,18 @@ export default function GradesPage() {
   const [editMyScore, setEditMyScore]           = useState("");
   const [editAvgScore, setEditAvgScore]         = useState("");
   const [showConfetti, setShowConfetti]         = useState(false);
+  const [editingGoalGpa, setEditingGoalGpa]     = useState(false);
 
   const [loading, setLoading]           = useState(true);
   const [saving, setSaving]             = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // AI study planner
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planHours, setPlanHours]         = useState(2);
+  const [planLoading, setPlanLoading]     = useState(false);
+  const [planResult, setPlanResult]       = useState<StudyPlan[] | null>(null);
+  const [planSaving, setPlanSaving]       = useState(false);
 
   // 목표 GPA 역산
   const [targetGpa,    setTargetGpa]    = useState(3.5);
@@ -259,15 +293,24 @@ export default function GradesPage() {
   }, []);
 
   // ─── Fetch ────────────────────────────────────────────────────────────────
-  const fetchEntries = useCallback(async () => {
+  const fetchAllEntries = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    const res = await getExamStrategies(user.id, activeTab);
-    setEntries(res.error ? [] : ((res.data ?? []) as ExamEntry[]));
+    const [midRes, finRes] = await Promise.all([
+      getExamStrategies(user.id, "midterm"),
+      getExamStrategies(user.id, "final"),
+    ]);
+    setMidtermEntries(midRes.error ? [] : ((midRes.data ?? []) as ExamEntry[]));
+    setFinalEntries(finRes.error ? [] : ((finRes.data ?? []) as ExamEntry[]));
     setLoading(false);
-  }, [user, activeTab]);
+  }, [user]);
 
-  useEffect(() => { setEntryMeta(loadGradesMeta()); }, []);
+  useEffect(() => {
+    setEntryMeta(loadGradesMeta());
+    setSubjectWeights(loadSubjectWeights());
+    const saved = parseInt(localStorage.getItem("smartgrade_daily_goal_hours") ?? "2", 10);
+    setPlanHours(isNaN(saved) || saved < 1 ? 2 : Math.min(saved, 12));
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -281,7 +324,13 @@ export default function GradesPage() {
     });
   }, [user]);
 
-  useEffect(() => { if (user) fetchEntries(); }, [user, activeTab]);
+  useEffect(() => { if (user) fetchAllEntries(); }, [user]);
+
+  // ─── Current-tab entries (for form context + priority list) ─────────────────
+  const entries = useMemo(
+    () => (activeTab === "midterm" ? midtermEntries : finalEntries),
+    [activeTab, midtermEntries, finalEntries],
+  );
 
   const handleSubjectSelect = useCallback((value: string) => {
     if (value === "__direct__") {
@@ -292,26 +341,80 @@ export default function GradesPage() {
     setIsDirectInput(false);
     setSubjectName(value);
     setFormErrors((p) => ({ ...p, subjectName: "" }));
-    const prev = entries.find((e) => e.subject_name === value);
+    const prev = [...midtermEntries, ...finalEntries].find((e) => e.subject_name === value);
     if (prev != null) setIsMajor(prev.is_major);
-  }, [entries]);
+  }, [midtermEntries, finalEntries]);
 
-  // ─── Derived stats (exam strategies only) ────────────────────────────────
-  const examGpa = useMemo(() => {
-    const scored = entries.filter((i) => i.my_score != null);
-    const pts = scored.reduce((s, i) => s + (scoreToGradePoint(i.my_score) ?? 0) * i.credits, 0);
-    const cr  = scored.reduce((s, i) => s + i.credits, 0);
-    return cr ? (pts / cr).toFixed(2) : "0.00";
-  }, [entries]);
+  // ─── Paired subjects (midterm + final combined by subject_name) ──────────
+  const pairedSubjects = useMemo(() => {
+    const allNames = Array.from(new Set([
+      ...midtermEntries.map((e) => e.subject_name),
+      ...finalEntries.map((e) => e.subject_name),
+    ]));
+    return allNames.map((name) => {
+      const mid = midtermEntries.find((e) => e.subject_name === name) ?? null;
+      const fin = finalEntries.find((e) => e.subject_name === name) ?? null;
+      const midPct = subjectWeights[name]?.midWeightPct ?? 40;
+      const finalPct = 100 - midPct;
+      const weightedScore = calcWeightedScore(mid?.my_score ?? null, fin?.my_score ?? null, midPct);
+      const status: "확정" | "진행중" | "기말만" | "미입력" =
+        weightedScore != null ? "확정" :
+        (mid?.my_score != null) ? "진행중" :
+        (fin?.my_score != null) ? "기말만" : "미입력";
+      const credits = (mid ?? fin)!.credits;
+      const isMajor = (mid ?? fin)!.is_major;
+      return { name, midEntry: mid, finalEntry: fin, midPct, finalPct, weightedScore, status, credits, isMajor };
+    });
+  }, [midtermEntries, finalEntries, subjectWeights]);
 
-  const majorGpa = useMemo(() => {
-    const scored = entries.filter((i) => i.is_major && i.my_score != null);
-    const pts = scored.reduce((s, i) => s + (scoreToGradePoint(i.my_score) ?? 0) * i.credits, 0);
-    const cr  = scored.reduce((s, i) => s + i.credits, 0);
-    return cr ? (pts / cr).toFixed(2) : "0.00";
-  }, [entries]);
+  const pairedMap = useMemo(
+    () => Object.fromEntries(pairedSubjects.map((s) => [s.name, s])),
+    [pairedSubjects],
+  );
 
-  const totalCredit    = useMemo(() => entries.reduce((s, i) => s + i.credits, 0), [entries]);
+  // 확정 GPA: 중간 + 기말 모두 입력된 과목만
+  const confirmedGpa = useMemo(() => {
+    const confirmed = pairedSubjects.filter((s) => s.weightedScore != null);
+    if (!confirmed.length) return null;
+    const pts = confirmed.reduce((sum, s) => sum + (scoreToGradePoint(s.weightedScore) ?? 0) * s.credits, 0);
+    const cr  = confirmed.reduce((sum, s) => sum + s.credits, 0);
+    return cr ? (pts / cr).toFixed(2) : null;
+  }, [pairedSubjects]);
+
+  const confirmedMajorGpa = useMemo(() => {
+    const confirmed = pairedSubjects.filter((s) => s.weightedScore != null && s.isMajor);
+    if (!confirmed.length) return null;
+    const pts = confirmed.reduce((sum, s) => sum + (scoreToGradePoint(s.weightedScore) ?? 0) * s.credits, 0);
+    const cr  = confirmed.reduce((sum, s) => sum + s.credits, 0);
+    return cr ? (pts / cr).toFixed(2) : null;
+  }, [pairedSubjects]);
+
+  // 예상 GPA: 점수가 있는 과목 전체 (미확정 포함)
+  const estimatedGpa = useMemo(() => {
+    const withScore = pairedSubjects.filter((s) => s.status !== "미입력");
+    if (!withScore.length) return null;
+    const pts = withScore.reduce((sum, s) => {
+      const score = s.weightedScore ?? s.midEntry?.my_score ?? s.finalEntry?.my_score ?? 0;
+      return sum + (scoreToGradePoint(score) ?? 0) * s.credits;
+    }, 0);
+    const cr = withScore.reduce((sum, s) => sum + s.credits, 0);
+    return cr ? (pts / cr).toFixed(2) : null;
+  }, [pairedSubjects]);
+
+  const inProgressCount = useMemo(
+    () => pairedSubjects.filter((s) => s.status === "진행중").length,
+    [pairedSubjects],
+  );
+  const confirmedCount = useMemo(
+    () => pairedSubjects.filter((s) => s.status === "확정").length,
+    [pairedSubjects],
+  );
+
+  // examGpa: 확정 우선, 없으면 예상 사용
+  const examGpa  = confirmedGpa ?? estimatedGpa ?? "0.00";
+  const majorGpa = confirmedMajorGpa ?? "0.00";
+
+  const totalCredit    = useMemo(() => pairedSubjects.reduce((s, p) => s + p.credits, 0), [pairedSubjects]);
   const remainingCount = useMemo(() => entries.filter((i) => !i.is_completed).length, [entries]);
   const majorHigher    = parseFloat(majorGpa) > parseFloat(examGpa);
 
@@ -327,8 +430,9 @@ export default function GradesPage() {
 
   // ─── 목표 GPA 역산 계산 ──────────────────────────────────────────────────────
   const gpaCalc = useMemo(() => {
-    const currentGpa   = parseFloat(examGpa);
-    const scoredCredit = entries.filter((i) => i.my_score != null).reduce((s, i) => s + i.credits, 0);
+    // 확정된 과목(중간+기말 모두 입력) 기준으로 역산
+    const currentGpa   = parseFloat(confirmedGpa ?? estimatedGpa ?? "0");
+    const scoredCredit = pairedSubjects.filter((s) => s.weightedScore != null).reduce((s, p) => s + p.credits, 0);
     const remain       = Math.max(remainCredit, 1);
     const totalExp     = scoredCredit + remain;
     const currentPts   = currentGpa * scoredCredit;
@@ -366,8 +470,10 @@ export default function GradesPage() {
       scenarios,
       currentPct: Math.min((currentGpa / 4.5) * 100, 100),
       targetPct:  Math.min((targetGpa  / 4.5) * 100, 100),
+      inProgressCount,
+      confirmedCount,
     };
-  }, [examGpa, entries, targetGpa, remainCredit]);
+  }, [confirmedGpa, estimatedGpa, pairedSubjects, targetGpa, remainCredit, inProgressCount, confirmedCount]);
 
   const sortedEntries = useMemo(() => {
     return [...entries]
@@ -435,10 +541,16 @@ export default function GradesPage() {
         localStorage.setItem(GRADES_META_KEY, JSON.stringify(newMeta));
         setEntryMeta(newMeta);
       }
+      // 과목별 중간/기말 비중 저장
+      const name = subjectName.trim();
+      const newWeights = { ...loadSubjectWeights(), [name]: { midWeightPct } };
+      localStorage.setItem(SUBJECT_WEIGHTS_KEY, JSON.stringify(newWeights));
+      setSubjectWeights(newWeights);
+
       setSubjectName(""); setIsDirectInput(false); setIsMajor(true); setCredits(3);
       setStudyRange(""); setChecklistItems([]); setNewCheckItem("");
-      setMyScoreInput(""); setAverageScoreInput(""); setFinalWeightPct(50); setFormErrors({});
-      await fetchEntries();
+      setMyScoreInput(""); setAverageScoreInput(""); setMidWeightPct(40); setFormErrors({});
+      await fetchAllEntries();
       showToast("과목이 추가되었습니다.", "success");
       subjectNameRef.current?.focus();
     }
@@ -450,7 +562,7 @@ export default function GradesPage() {
     setSaving(true);
     const res = await deleteExamStrategy(id);
     if (res.error) showToast("삭제에 실패했습니다.", "error");
-    else { setDeleteConfirmId(null); await fetchEntries(); showToast("과목이 삭제되었습니다.", "success"); }
+    else { setDeleteConfirmId(null); await fetchAllEntries(); showToast("과목이 삭제되었습니다.", "success"); }
     setSaving(false);
   };
 
@@ -459,7 +571,7 @@ export default function GradesPage() {
     setSaving(true);
     const res = await toggleExamStrategyCompleted(id, !current);
     if (res.error) showToast("상태 변경에 실패했습니다.", "error");
-    else { await fetchEntries(); if (!current) showToast("학습 완료! 🎉", "success"); }
+    else { await fetchAllEntries(); if (!current) showToast("학습 완료! 🎉", "success"); }
     setSaving(false);
   };
 
@@ -473,8 +585,66 @@ export default function GradesPage() {
     setSaving(true);
     const res = await updateExamStrategyScores(id, my, avg);
     if (res.error) showToast("수정에 실패했습니다.", "error");
-    else { setEditingId(null); await fetchEntries(); showToast("점수가 수정되었습니다.", "success"); }
+    else { setEditingId(null); await fetchAllEntries(); showToast("점수가 수정되었습니다.", "success"); }
     setSaving(false);
+  };
+
+  const handleGeneratePlan = async () => {
+    if (entries.length === 0) { showToast("등록된 과목이 없습니다.", "error"); return; }
+    setPlanLoading(true);
+    setPlanResult(null);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch("/api/ai-planner", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          today,
+          dailyHours: planHours,
+          targetGpa,
+          subjects: entries.map((item) => ({
+            name: item.subject_name,
+            myScore: item.my_score,
+            averageScore: item.average_score,
+            grade: scoreToGradeLetter(item.my_score),
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setPlanResult(json.plans ?? []);
+    } catch {
+      showToast("계획 생성에 실패했습니다. 다시 시도해주세요.", "error");
+    } finally {
+      setPlanLoading(false);
+    }
+  };
+
+  const handleAddPlans = async () => {
+    if (!user || !planResult?.length) return;
+    setPlanSaving(true);
+    let count = 0;
+    for (const plan of planResult) {
+      const colonIdx = plan.task.indexOf(":");
+      const subjectName = colonIdx > 0 ? plan.task.slice(0, colonIdx).trim() : plan.task;
+      const res = await createStudyCalendarEvent({
+        user_id: user.id,
+        subject_name: subjectName,
+        task: plan.task,
+        study_date: plan.date,
+        duration: plan.duration,
+      });
+      if (!res.error) count++;
+    }
+    setPlanModalOpen(false);
+    setPlanResult(null);
+    showToast(`${count}개의 학습 일정을 타이머에 추가했습니다.`, "success");
+    setPlanSaving(false);
+  };
+
+  const updatePlanRow = (index: number, field: keyof StudyPlan, value: string | number) => {
+    setPlanResult((prev) => prev?.map((p, i) => i === index ? { ...p, [field]: value } : p) ?? null);
   };
 
   // ─── Guards ────────────────────────────────────────────────────────────────
@@ -495,24 +665,20 @@ export default function GradesPage() {
       {showConfetti && <Confetti />}
 
       {/* ── 헤더 + 시험 GPA 요약 카드 ──────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">📊 성적 관리</p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">시험 점수 & 공부 전략</h1>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">📊 성적 관리</p>
+            <h1 className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">시험 점수 & 공부 전략</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {/* 뷰 모드 토글 */}
-            <div className="flex rounded-full border border-slate-200 p-1 dark:border-slate-700">
-              <button type="button" onClick={() => setViewMode("grid")}
-                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "grid" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-              </button>
-              <button type="button" onClick={() => setViewMode("table")}
-                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "table" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => { setPlanResult(null); setPlanModalOpen(true); }}
+              className="inline-flex items-center gap-2 rounded-full bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700"
+            >
+              ✨ AI 학습 계획 생성
+            </button>
             <Link href="/credits"
               className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-300">
               🎓 학점 관리
@@ -533,43 +699,112 @@ export default function GradesPage() {
         )}
 
         {/* 이번 시험 GPA 3개 stat */}
-        <div className="mt-5 grid grid-cols-3 gap-3">
-          <div className="col-span-3 rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-950 sm:col-span-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">이번 시험 예상 GPA</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          {/* Card 1: 확정/예상 GPA + 목표 인라인 편집 */}
+          <div className="rounded-[1.5rem] border border-sky-200 bg-sky-50 p-4 dark:border-sky-800/50 dark:bg-sky-950/20">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-sky-500 dark:text-sky-400">
+                  {confirmedGpa != null ? "확정 GPA" : "예상 GPA (중간 기준)"}
+                </p>
+                {confirmedGpa != null && inProgressCount > 0 && (
+                  <p className="text-[10px] text-amber-500 dark:text-amber-400">진행 중 {inProgressCount}개 미포함</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingGoalGpa((v) => !v)}
+                className="rounded-full border border-sky-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-sky-600 transition hover:bg-sky-50 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-400"
+              >
+                목표 {targetGpa.toFixed(1)} ✎
+              </button>
+            </div>
+            {editingGoalGpa && (
+              <div className="mt-2 space-y-1.5">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range" min={2.0} max={4.5} step={0.1} value={targetGpa}
+                    onChange={(e) => setTargetGpa(parseFloat(e.target.value))}
+                    className="flex-1 accent-sky-600"
+                  />
+                  <span className="w-10 text-right text-sm font-bold text-sky-600 dark:text-sky-400">{targetGpa.toFixed(1)}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingGoalGpa(false)}
+                  className="text-[10px] font-semibold text-slate-400 underline-offset-2 hover:underline"
+                >
+                  완료
+                </button>
+              </div>
+            )}
             {gpaNum === 0 ? (
-              <p className="mt-2 text-sm text-slate-400 dark:text-slate-500">점수를 입력하면 표시됩니다</p>
+              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">점수를 입력하면 표시됩니다</p>
             ) : (
               <>
-                <p className="mt-1 text-3xl font-bold text-sky-600 dark:text-sky-400">{examGpa}</p>
-                <div className="mt-3">
-                  <div className="flex justify-between text-[10px] text-slate-400 mb-1"><span>0.0</span><span>4.5</span></div>
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <p className="mt-1.5 text-3xl font-bold text-sky-600 dark:text-sky-400">{examGpa}</p>
+                {confirmedGpa != null && estimatedGpa != null && confirmedGpa !== estimatedGpa && (
+                  <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                    진행 중 포함 예상: <span className="font-semibold text-amber-600 dark:text-amber-400">{estimatedGpa}</span>
+                  </p>
+                )}
+                <div className="mt-2">
+                  <div className="mb-1 flex justify-between text-[10px] text-slate-400">
+                    <span>현재 {examGpa}</span><span>목표 {targetGpa.toFixed(1)}</span>
+                  </div>
+                  <div className="relative h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                     <div className="h-full rounded-full bg-sky-500 transition-all duration-500" style={{ width: `${gaugePct}%` }} />
+                    <div className="absolute inset-y-0 w-0.5 bg-amber-500" style={{ left: `${Math.min((targetGpa / 4.5) * 100, 100)}%` }} />
                   </div>
                 </div>
               </>
             )}
           </div>
-          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">전공 GPA</p>
-            <p className={`mt-1 text-3xl font-bold ${majorHigher ? "text-emerald-600 dark:text-emerald-400" : parseFloat(majorGpa) < parseFloat(examGpa) ? "text-rose-600 dark:text-rose-400" : "text-slate-900 dark:text-slate-100"}`}>
+
+          {/* Card 2: 전공 GPA + 목표 대비 진행률 */}
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">전공 GPA</p>
+            <p className={`mt-1.5 text-3xl font-bold ${majorHigher ? "text-emerald-600 dark:text-emerald-400" : parseFloat(majorGpa) < parseFloat(examGpa) ? "text-rose-600 dark:text-rose-400" : "text-slate-900 dark:text-slate-100"}`}>
               {majorGpa}
             </p>
-            <p className={`mt-1 text-xs font-medium ${majorHigher ? "text-emerald-500" : "text-rose-500"}`}>
-              {majorHigher ? "▲ 전체 대비 높음" : "▼ 전체 대비 낮음"}
-            </p>
+            <div className="mt-2">
+              <div className="mb-1 flex justify-between text-[10px] text-slate-400">
+                <span className={majorHigher ? "text-emerald-500" : "text-rose-500"}>{majorHigher ? "▲ 전체 대비 높음" : "▼ 전체 대비 낮음"}</span>
+                <span>목표 {targetGpa.toFixed(1)}</span>
+              </div>
+              <div className="relative h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${majorHigher ? "bg-emerald-500" : "bg-rose-400"}`}
+                  style={{ width: `${Math.min((parseFloat(majorGpa) / 4.5) * 100, 100)}%` }}
+                />
+                <div className="absolute inset-y-0 w-0.5 bg-amber-500" style={{ left: `${Math.min((targetGpa / 4.5) * 100, 100)}%` }} />
+              </div>
+            </div>
           </div>
-          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-center dark:border-slate-700 dark:bg-slate-950">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">이수 예정 학점</p>
-            <p className="mt-1 text-3xl font-bold text-slate-900 dark:text-slate-100">{totalCredit}</p>
-            <p className="mt-1 text-xs text-slate-400">학점</p>
+
+          {/* Card 3: 이수 학점 + 졸업 진행률 */}
+          <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-950">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">이수 예정 학점</p>
+            <p className="mt-1.5 text-3xl font-bold text-slate-900 dark:text-slate-100">{totalCredit}</p>
+            <div className="mt-2">
+              <div className="mb-1 flex justify-between text-[10px] text-slate-400">
+                <span>현재 {totalCredit}학점</span>
+                <span>목표 {totalCredit + remainCredit}학점</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <div
+                  className="h-full rounded-full bg-violet-500 transition-all duration-500"
+                  style={{ width: `${(totalCredit + remainCredit) > 0 ? Math.min((totalCredit / (totalCredit + remainCredit)) * 100, 100) : 0}%` }}
+                />
+              </div>
+            </div>
           </div>
         </div>
 
         {/* 누적 GPA 안내 */}
-        <div className="mt-4 flex items-center gap-3 rounded-[1.25rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-950/50">
-          <span className="text-base">🎓</span>
-          <p className="text-sm text-slate-600 dark:text-slate-400">
+        <div className="mt-3 flex items-center gap-2 rounded-[1.25rem] border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950/50">
+          <span className="text-sm">🎓</span>
+          <p className="text-xs text-slate-600 dark:text-slate-400">
             누적 GPA · 졸업학점 관리는{" "}
             <Link href="/credits" className="font-semibold text-sky-600 underline-offset-2 hover:underline dark:text-sky-400">
               학점 관리 페이지
@@ -599,40 +834,30 @@ export default function GradesPage() {
             {/* 과목명 */}
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">과목명 *</label>
-              {timetableSubjects.length === 0 ? (
-                <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
-                  <p className="text-sm text-amber-700 dark:text-amber-300">
-                    시간표에 과목을 먼저 등록해주세요.
-                    <br />
-                    <span className="text-xs opacity-75">홈 대시보드 → 주간 시간표에서 과목을 추가할 수 있습니다.</span>
-                  </p>
-                </div>
-              ) : (
-                <div className="relative mt-2">
-                  <select
-                    value={isDirectInput ? "__direct__" : subjectName}
-                    onChange={(e) => handleSubjectSelect(e.target.value)}
-                    className={`w-full appearance-none rounded-3xl border px-4 py-3 pr-10 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${
-                      formErrors.subjectName
-                        ? "border-rose-400 bg-rose-50 dark:border-rose-600 dark:bg-rose-950/20"
-                        : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"
-                    }`}>
-                    <option value="">과목을 선택하세요</option>
-                    {timetableSubjects.map((s) => <option key={s} value={s}>{s}</option>)}
-                    <option value="__direct__">✏️ 직접 입력</option>
-                  </select>
-                  <svg className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </div>
-              )}
-              {(isDirectInput || timetableSubjects.length === 0) && (
+              <div className="relative mt-2">
+                <select
+                  value={isDirectInput ? "__direct__" : subjectName}
+                  onChange={(e) => handleSubjectSelect(e.target.value)}
+                  className={`w-full appearance-none rounded-3xl border px-4 py-3 pr-10 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${
+                    formErrors.subjectName
+                      ? "border-rose-400 bg-rose-50 dark:border-rose-600 dark:bg-rose-950/20"
+                      : "border-slate-200 bg-white focus:border-sky-400 dark:border-slate-700"
+                  }`}>
+                  <option value="">과목을 선택하세요 (또는 직접 입력)</option>
+                  {timetableSubjects.map((s) => <option key={s} value={s}>{s}</option>)}
+                  <option value="__direct__">✏️ 직접 입력</option>
+                </select>
+                <svg className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </div>
+              {isDirectInput && (
                 <input
                   ref={subjectNameRef}
                   value={subjectName}
                   onChange={(e) => { setSubjectName(e.target.value); setFormErrors((p) => ({ ...p, subjectName: "" })); }}
-                  placeholder={isDirectInput ? "과목명을 직접 입력하세요" : "과목명을 입력하세요"}
-                  autoFocus={isDirectInput}
+                  placeholder="과목명을 직접 입력하세요"
+                  autoFocus
                   className={`mt-2 w-full rounded-3xl border px-4 py-3 text-sm text-slate-900 outline-none transition dark:text-slate-100 dark:bg-slate-900 ${
                     formErrors.subjectName
                       ? "border-rose-400 bg-rose-50 dark:border-rose-600 dark:bg-rose-950/20"
@@ -726,27 +951,32 @@ export default function GradesPage() {
               </div>
             </div>
 
-            {/* 기말 비중 */}
+            {/* 중간/기말 비중 */}
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                기말고사 비중
-                <span className="ml-2 normal-case text-[10px] text-slate-400">(우선순위 보너스 계산에 사용)</span>
+                중간 / 기말 비중 설정
+                <span className="ml-2 normal-case text-[10px] text-slate-400">(가중 최종 점수 계산에 사용)</span>
               </label>
               <div className="mt-2 flex flex-wrap gap-2">
-                {([40, 50, 60, 70] as const).map((pct) => (
-                  <button key={pct} type="button" onClick={() => setFinalWeightPct(pct)}
+                {([
+                  { mid: 30, fin: 70 },
+                  { mid: 40, fin: 60 },
+                  { mid: 50, fin: 50 },
+                  { mid: 60, fin: 40 },
+                ] as const).map(({ mid, fin }) => (
+                  <button key={mid} type="button" onClick={() => setMidWeightPct(mid)}
                     className={`rounded-full border px-4 py-1.5 text-sm font-semibold transition ${
-                      finalWeightPct === pct
-                        ? pct >= 60 ? "border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
-                          : pct <= 40 ? "border-rose-300 bg-rose-100 text-rose-700 dark:border-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
-                          : "border-sky-300 bg-sky-100 text-sky-700 dark:border-sky-700 dark:bg-sky-950/50 dark:text-sky-300"
+                      midWeightPct === mid
+                        ? "border-sky-300 bg-sky-100 text-sky-700 dark:border-sky-700 dark:bg-sky-950/50 dark:text-sky-300"
                         : "border-slate-200 text-slate-500 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400"
                     }`}>
-                    {pct}%
-                    {pct >= 60 ? " +1" : pct <= 40 ? " -1" : " ±0"}
+                    중간 {mid}% / 기말 {fin}%
                   </button>
                 ))}
               </div>
+              <p className="mt-1.5 ml-1 text-[10px] text-slate-400 dark:text-slate-500">
+                현재 설정: 중간 <span className="font-bold text-sky-600">{midWeightPct}%</span> + 기말 <span className="font-bold text-sky-600">{finalWeightPct}%</span>
+              </p>
             </div>
 
             <button type="button" onClick={handleAdd} disabled={saving}
@@ -757,6 +987,8 @@ export default function GradesPage() {
         </div>
       </section>
 
+      <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
+        <div className="space-y-6">
       {/* ── 점수 비교 차트 ────────────────────────────────── */}
       {scoreChartData.length > 0 && (
         <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
@@ -853,6 +1085,15 @@ export default function GradesPage() {
               </div>
             </div>
 
+            {/* 진행 중 과목 안내 */}
+            {gpaCalc.inProgressCount > 0 && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800/50 dark:bg-amber-950/20">
+                <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  ⏳ 기말고사 미입력 {gpaCalc.inProgressCount}개 과목은 제외됩니다. 기말 점수 입력 후 재계산됩니다.
+                </p>
+              </div>
+            )}
+
             {/* 필요 평점 + 달성 가능 여부 */}
             <div className={`rounded-2xl border p-5 text-center ${
               gpaCalc.isImpossible
@@ -925,8 +1166,9 @@ export default function GradesPage() {
         </div>
       </section>
 
-      {/* ── 오늘의 추천 공부 우선순위 ────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+        </div>
+        {/* ── 과목 목록 & 추천 우선순위 ───────────────────── */}
+        <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🔥 오늘의 추천 공부 우선순위</p>
@@ -938,6 +1180,16 @@ export default function GradesPage() {
             <span className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
               전체 {entries.length}개
             </span>
+            <div className="flex rounded-full border border-slate-200 p-1 dark:border-slate-700">
+              <button type="button" onClick={() => setViewMode("grid")}
+                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "grid" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              </button>
+              <button type="button" onClick={() => setViewMode("table")}
+                className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${viewMode === "table" ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "text-slate-500 hover:text-slate-900 dark:text-slate-400"}`}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+              </button>
+            </div>
             <a href="/priority"
               className="inline-flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700">
               전용 페이지에서 보기
@@ -996,14 +1248,26 @@ export default function GradesPage() {
           ) : (
             <div className="space-y-4">
               {sortedEntries.map((item) => {
-                const demoted     = activeTab === "final" && isFinalDemoted(item);
-                const diff        = item.my_score != null && item.average_score != null ? item.my_score - item.average_score : null;
-                const grade       = scoreToGradeLetter(item.my_score);
-                const pct         = item.my_score != null && item.average_score != null ? estimatePercentile(item.my_score, item.average_score) : null;
-                const isEditing   = editingId === item.id;
+                const demoted       = activeTab === "final" && isFinalDemoted(item);
+                const diff          = item.my_score != null && item.average_score != null ? item.my_score - item.average_score : null;
+                const pct           = item.my_score != null && item.average_score != null ? estimatePercentile(item.my_score, item.average_score) : null;
+                const isEditing     = editingId === item.id;
                 const priorityScore = (item as any)._score as number ?? 0;
                 const rangeInfo     = (item as any)._range  as ReturnType<typeof classifyStudyRange>;
                 const statusInfo    = (item as any)._status as ReturnType<typeof classifyScoreStatus>;
+                // 중간/기말 통합 데이터
+                const paired    = pairedMap[item.subject_name];
+                const midPct    = paired?.midPct ?? 40;
+                const finalPct  = paired?.finalPct ?? 60;
+                const midScore  = paired?.midEntry?.my_score ?? null;
+                const finScore  = paired?.finalEntry?.my_score ?? null;
+                const weighted  = paired?.weightedScore ?? null;
+                const grade     = scoreToGradeLetter(weighted ?? item.my_score);
+                // 목표 등급(B+, 80점)을 기준으로 기말에서 필요한 점수 역산
+                const targetScore     = 80;
+                const neededFinalScore = activeTab === "midterm" && midScore != null && finScore == null
+                  ? calcNeededFinalScore(targetScore, midScore, midPct)
+                  : null;
 
                 return (
                   <div key={item.id}
@@ -1020,9 +1284,18 @@ export default function GradesPage() {
                               {item.is_major ? "전공" : "교양"}
                             </span>
                             {demoted && <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700">하향 조정</span>}
-                            {grade !== "—" && (
+                            {weighted != null ? (
+                              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">
+                                확정 {grade}
+                              </span>
+                            ) : grade !== "—" ? (
                               <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-0.5 text-xs font-bold text-violet-700 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300">
                                 예상 {grade}
+                              </span>
+                            ) : null}
+                            {paired?.status === "진행중" && (
+                              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+                                기말 미입력
                               </span>
                             )}
                             <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${SCORE_STATUS_STYLE[statusInfo.label]}`}>
@@ -1082,6 +1355,42 @@ export default function GradesPage() {
                             )}
                           </div>
 
+                          {/* 중간/기말 가중 점수 패널 */}
+                          <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
+                            <div className="flex flex-wrap items-center gap-3 text-xs">
+                              <div className="flex items-center gap-1">
+                                <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-bold text-sky-600 dark:bg-sky-950/50 dark:text-sky-400">중간 {midPct}%</span>
+                                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                                  {midScore != null ? `${midScore}점` : "미입력"}
+                                </span>
+                                {midScore != null && <span className="text-slate-400">→ {Math.round(midScore * midPct) / 100}점 기여</span>}
+                              </div>
+                              <span className="text-slate-300 dark:text-slate-600">+</span>
+                              <div className="flex items-center gap-1">
+                                <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-bold text-violet-600 dark:bg-violet-950/50 dark:text-violet-400">기말 {finalPct}%</span>
+                                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                                  {finScore != null ? `${finScore}점` : "미입력"}
+                                </span>
+                                {finScore != null && <span className="text-slate-400">→ {Math.round(finScore * finalPct) / 100}점 기여</span>}
+                              </div>
+                              {weighted != null && (
+                                <>
+                                  <span className="text-slate-300 dark:text-slate-600">=</span>
+                                  <span className="font-bold text-emerald-600 dark:text-emerald-400">가중 {weighted}점 ({scoreToGradeLetter(weighted)})</span>
+                                </>
+                              )}
+                            </div>
+                            {neededFinalScore != null && (
+                              <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+                                B+(80점) 달성하려면 기말에서 최소{" "}
+                                <span className={`font-bold ${neededFinalScore > 100 ? "text-rose-600" : "text-amber-700"}`}>
+                                  {neededFinalScore > 100 ? "불가능 (100점 초과)" : `${neededFinalScore}점`}
+                                </span>{" "}
+                                필요
+                              </p>
+                            )}
+                          </div>
+
                           <div className="grid gap-2 sm:grid-cols-2">
                             <div className="rounded-2xl bg-slate-50 p-3 text-sm dark:bg-slate-950">
                               <p className="text-xs font-semibold text-slate-500">학점</p>
@@ -1118,6 +1427,8 @@ export default function GradesPage() {
         </div>
       </section>
 
+      </div>
+
       {/* ── 삭제 확인 모달 ────────────────────────────────── */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
@@ -1142,6 +1453,158 @@ export default function GradesPage() {
                   삭제
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── AI 학습 계획 생성 모달 ───────────────────── */}
+      {planModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+          <div className="flex w-full max-w-lg flex-col overflow-hidden rounded-[2rem] bg-white shadow-2xl dark:bg-slate-900" style={{ maxHeight: "90vh" }}>
+            {/* 헤더 */}
+            <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">✨ AI 학습 계획 생성</p>
+                <h2 className="mt-0.5 text-base font-semibold text-slate-900 dark:text-slate-100">
+                  {planResult ? "생성된 학습 계획" : "계획 생성 설정"}
+                </h2>
+              </div>
+              <button type="button" onClick={() => { setPlanModalOpen(false); setPlanResult(null); }}
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* 본문 */}
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {planLoading ? (
+                <div className="space-y-3">
+                  {[0.4, 0.7, 0.55, 0.85, 0.6, 0.75].map((w, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <div className="h-8 w-24 flex-shrink-0 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" />
+                      <div className="h-8 flex-1 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" style={{ maxWidth: `${w * 100}%` }} />
+                      <div className="h-8 w-16 flex-shrink-0 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" />
+                    </div>
+                  ))}
+                  <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">AI가 학습 계획을 생성하고 있어요...</p>
+                </div>
+              ) : planResult ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-700">
+                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">날짜</th>
+                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">할 일</th>
+                        <th className="pb-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">시간(분)</th>
+                        <th className="pb-3" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {planResult.map((plan, i) => (
+                        <tr key={i}>
+                          <td className="py-2 pr-3">
+                            <input type="date" value={plan.date}
+                              onChange={(e) => updatePlanRow(i, "date", e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 pr-3">
+                            <input value={plan.task}
+                              onChange={(e) => updatePlanRow(i, "task", e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 pr-2">
+                            <input type="number" min={5} max={480} value={plan.duration}
+                              onChange={(e) => updatePlanRow(i, "duration", parseInt(e.target.value, 10) || 0)}
+                              className="w-20 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 text-right">
+                            <button type="button"
+                              onClick={() => setPlanResult((prev) => prev?.filter((_, idx) => idx !== i) ?? null)}
+                              className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/30">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {planResult.length === 0 && (
+                    <p className="py-6 text-center text-sm text-slate-400">항목이 없습니다. 다시 생성해보세요.</p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {/* 자동 포함 성적 안내 */}
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-4 dark:border-violet-900/40 dark:bg-violet-950/30">
+                    <p className="text-sm font-semibold text-violet-700 dark:text-violet-300">
+                      ✅ 현재 등록된 과목 {entries.length}개의 성적·평균·목표 GPA 정보가 자동으로 포함됩니다.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {entries.slice(0, 6).map((item) => (
+                        <span key={item.id} className="rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/50 dark:text-violet-300">
+                          {item.subject_name}{item.my_score != null ? ` (${item.my_score}점)` : ""}
+                        </span>
+                      ))}
+                      {entries.length > 6 && (
+                        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">+{entries.length - 6}개</span>
+                      )}
+                    </div>
+                    <p className="mt-2 text-xs font-medium text-violet-600 dark:text-violet-400">
+                      목표 GPA {targetGpa.toFixed(1)} · 현재 GPA {examGpa}
+                    </p>
+                  </div>
+
+                  {/* 하루 목표 공부 시간 */}
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">하루 목표 공부 시간</label>
+                      <span className="text-sm font-bold text-violet-600 dark:text-violet-400">{planHours}시간</span>
+                    </div>
+                    <input type="range" min={1} max={12} value={planHours}
+                      onChange={(e) => setPlanHours(parseInt(e.target.value, 10))}
+                      className="w-full accent-violet-600" />
+                    <div className="mt-1 flex justify-between text-[10px] text-slate-400"><span>1시간</span><span>12시간</span></div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 푸터 */}
+            <div className="flex flex-shrink-0 gap-3 border-t border-slate-200 px-6 py-4 dark:border-slate-800">
+              {planLoading ? (
+                <div className="flex flex-1 items-center justify-center py-1 text-sm text-slate-400">생성 중...</div>
+              ) : planResult ? (
+                <>
+                  <button type="button" onClick={() => setPlanResult(null)}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    ← 다시 설정
+                  </button>
+                  <button type="button" onClick={handleGeneratePlan}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    🔄 다시 생성
+                  </button>
+                  <button type="button" onClick={handleAddPlans} disabled={planSaving || planResult.length === 0}
+                    className="flex-1 rounded-3xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    {planSaving ? "저장 중..." : `타이머 일정에 추가 (${planResult.length}개)`}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" onClick={() => { setPlanModalOpen(false); setPlanResult(null); }}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    취소
+                  </button>
+                  <button type="button" onClick={handleGeneratePlan} disabled={entries.length === 0}
+                    className="flex-1 rounded-3xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    계획 생성
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

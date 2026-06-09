@@ -11,6 +11,7 @@ function avatarChar(name: string) {
 const baseNavItems = [
   { href: "/", label: "홈 대시보드", icon: "🏠" },
   { href: "/timer", label: "뽀모도로 타이머", icon: "⏱️" },
+  { href: "/quiz", label: "AI 퀴즈", icon: "🧠" },
   { href: "/priority", label: "공부 우선순위", icon: "🔥" },
   { href: "/planner", label: "플래너", icon: "📋" },
   { href: "/grades", label: "성적 관리", icon: "📊" },

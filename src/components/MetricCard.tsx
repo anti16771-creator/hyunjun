@@ -16,28 +16,28 @@ type MetricCardProps = {
 
 export default function MetricCard({ label, value, description, icon, progress, badge, emptyHint, isEmpty }: MetricCardProps) {
   return (
-    <div className="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <div className="rounded-[1.75rem] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {icon ? (
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-sky-50 text-sky-500 dark:bg-sky-950/50 dark:text-sky-400">
+            <span className="flex h-7 w-7 items-center justify-center rounded-xl bg-sky-50 text-sky-500 dark:bg-sky-950/50 dark:text-sky-400">
               {icon}
             </span>
           ) : null}
-          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">{label}</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">{label}</p>
         </div>
         {badge && (
-          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-bold text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">
+          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">
             {badge}
           </span>
         )}
       </div>
 
-      <p className={`mt-3 text-3xl font-semibold ${isEmpty ? "text-slate-400 dark:text-slate-500" : "text-sky-600 dark:text-sky-400"}`}>
+      <p className={`mt-2 text-2xl font-semibold ${isEmpty ? "text-slate-400 dark:text-slate-500" : "text-sky-600 dark:text-sky-400"}`}>
         {value}
       </p>
 
-      {description ? <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{description}</p> : null}
+      {description ? <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{description}</p> : null}
 
       {progress !== undefined && (
         <div className="mt-3">

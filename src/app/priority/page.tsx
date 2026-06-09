@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import LoadingCard from "@/src/components/LoadingCard";
 import ToastMessage from "@/src/components/ToastMessage";
 import { useAuth } from "@/src/context/AuthContext";
-import { getExamEvents, getExamStrategies, toggleExamStrategyCompleted } from "@/src/lib/supabase";
+import { createStudyCalendarEvent, getExamEvents, getExamStrategies, toggleExamStrategyCompleted } from "@/src/lib/supabase";
 import { dayDiff } from "@/src/lib/dateUtils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -25,6 +25,8 @@ type ExamEntry = {
   average_score: number | null;
   is_completed: boolean;
 };
+
+type StudyPlan = { date: string; task: string; duration: number };
 
 // ─── Priority formula (shared with grades page) ───────────────────────────────
 type RangeLevel  = "좁음" | "보통" | "넓음";
@@ -145,6 +147,13 @@ export default function PriorityPage() {
   const [loading, setLoading]     = useState(true);
   const [saving, setSaving]       = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
+
+  // AI study planner
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planHours, setPlanHours]         = useState(2);
+  const [planLoading, setPlanLoading]     = useState(false);
+  const [planResult, setPlanResult]       = useState<StudyPlan[] | null>(null);
+  const [planSaving, setPlanSaving]       = useState(false);
   const [expiredOpen, setExpiredOpen]   = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType]       = useState<"success" | "error">("success");
@@ -171,7 +180,11 @@ export default function PriorityPage() {
     setLoading(false);
   }, [user, activeTab]);
 
-  useEffect(() => { setEntryMeta(loadGradesMeta()); }, []);
+  useEffect(() => {
+    setEntryMeta(loadGradesMeta());
+    const saved = parseInt(localStorage.getItem("smartgrade_daily_goal_hours") ?? "2", 10);
+    setPlanHours(isNaN(saved) || saved < 1 ? 2 : Math.min(saved, 12));
+  }, []);
   useEffect(() => { if (user) fetchEntries(); }, [user, activeTab]);
 
   // ─── Derived data ────────────────────────────────────────────────────────────
@@ -245,6 +258,65 @@ export default function PriorityPage() {
     router.push("/timer");
   };
 
+  const handleGeneratePlan = async () => {
+    if (sorted.length === 0) { showToast("등록된 과목이 없습니다.", "error"); return; }
+    setPlanLoading(true);
+    setPlanResult(null);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch("/api/ai-planner", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          today,
+          dailyHours: planHours,
+          subjects: sorted.map((item) => ({
+            name: item.subject_name,
+            examDate: item._examDate,
+            priorityScore: item._score,
+            studyRange: item.study_range,
+            myScore: item.my_score,
+            averageScore: item.average_score,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setPlanResult(json.plans ?? []);
+    } catch {
+      showToast("계획 생성에 실패했습니다. 다시 시도해주세요.", "error");
+    } finally {
+      setPlanLoading(false);
+    }
+  };
+
+  const handleAddPlans = async () => {
+    if (!user || !planResult?.length) return;
+    setPlanSaving(true);
+    let count = 0;
+    for (const plan of planResult) {
+      const colonIdx = plan.task.indexOf(":");
+      const subjectName = colonIdx > 0 ? plan.task.slice(0, colonIdx).trim() : plan.task;
+      const res = await createStudyCalendarEvent({
+        user_id: user.id,
+        subject_name: subjectName,
+        task: plan.task,
+        study_date: plan.date,
+        duration: plan.duration,
+      });
+      if (!res.error) count++;
+    }
+    setPlanModalOpen(false);
+    setPlanResult(null);
+    showToast(`${count}개의 학습 일정을 캘린더에 추가했습니다.`, "success");
+    setPlanSaving(false);
+  };
+
+  const updatePlanRow = (index: number, field: keyof StudyPlan, value: string | number) => {
+    setPlanResult((prev) => prev?.map((p, i) => i === index ? { ...p, [field]: value } : p) ?? null);
+  };
+
   // ─── Guard ───────────────────────────────────────────────────────────────────
   if (authLoading) return <LoadingCard />;
   if (!user) {
@@ -260,14 +332,21 @@ export default function PriorityPage() {
       {showConfetti && <Confetti />}
 
       {/* ── 헤더 ────────────────────────────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🔥 공부 우선순위</p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">오늘의 공부 우선순위</h1>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{todayLabel}</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">🔥 공부 우선순위</p>
+            <h1 className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">오늘의 공부 우선순위</h1>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{todayLabel}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => { setPlanResult(null); setPlanModalOpen(true); }}
+              className="inline-flex items-center gap-2 rounded-full bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700"
+            >
+              ✨ AI 공부 계획 생성
+            </button>
             <button type="button" onClick={fetchEntries} disabled={loading}
               className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={loading ? "animate-spin" : ""}>
@@ -284,21 +363,21 @@ export default function PriorityPage() {
         </div>
 
         {/* 3 stat 카드 */}
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-4 grid grid-cols-3 gap-2">
           {([
             { label: "전체 과목",    value: String(totalCount),     color: "text-slate-900 dark:text-slate-100" },
             { label: "학습 완료",    value: String(completedCount), color: "text-emerald-600 dark:text-emerald-400" },
             { label: "오늘 집중 추천", value: topSubject,             color: "text-sky-600 dark:text-sky-400" },
           ] as const).map((s) => (
-            <div key={s.label} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 text-center dark:border-slate-700 dark:bg-slate-950">
+            <div key={s.label} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-3 text-center dark:border-slate-700 dark:bg-slate-950">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{s.label}</p>
-              <p className={`mt-1 truncate text-xl font-bold ${s.color}`}>{s.value}</p>
+              <p className={`mt-1 truncate text-lg font-bold ${s.color}`}>{s.value}</p>
             </div>
           ))}
         </div>
 
         {/* 중간/기말 탭 */}
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           <div className="flex overflow-hidden rounded-full border border-slate-200 p-1 dark:border-slate-700">
             {(["midterm", "final"] as const).map((t) => (
               <button key={t} type="button" onClick={() => setActiveTab(t)}
@@ -612,6 +691,156 @@ export default function PriorityPage() {
                   );
                 })}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── AI 공부 계획 생성 모달 ───────────────────── */}
+      {planModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+          <div className="flex w-full max-w-lg flex-col overflow-hidden rounded-[2rem] bg-white shadow-2xl dark:bg-slate-900" style={{ maxHeight: "90vh" }}>
+            {/* 헤더 */}
+            <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">✨ AI 공부 계획 생성</p>
+                <h2 className="mt-0.5 text-base font-semibold text-slate-900 dark:text-slate-100">
+                  {planResult ? "생성된 공부 계획" : "계획 생성 설정"}
+                </h2>
+              </div>
+              <button type="button" onClick={() => { setPlanModalOpen(false); setPlanResult(null); }}
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* 본문 */}
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {planLoading ? (
+                <div className="space-y-3">
+                  {[0.4, 0.7, 0.55, 0.85, 0.6, 0.75].map((w, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <div className="h-8 w-24 flex-shrink-0 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" />
+                      <div className="h-8 flex-1 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" style={{ maxWidth: `${w * 100}%` }} />
+                      <div className="h-8 w-16 flex-shrink-0 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-700" />
+                    </div>
+                  ))}
+                  <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">AI가 공부 계획을 생성하고 있어요...</p>
+                </div>
+              ) : planResult ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-700">
+                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">날짜</th>
+                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">할 일</th>
+                        <th className="pb-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">시간(분)</th>
+                        <th className="pb-3" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {planResult.map((plan, i) => (
+                        <tr key={i}>
+                          <td className="py-2 pr-3">
+                            <input type="date" value={plan.date}
+                              onChange={(e) => updatePlanRow(i, "date", e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 pr-3">
+                            <input value={plan.task}
+                              onChange={(e) => updatePlanRow(i, "task", e.target.value)}
+                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 pr-2">
+                            <input type="number" min={5} max={480} value={plan.duration}
+                              onChange={(e) => updatePlanRow(i, "duration", parseInt(e.target.value, 10) || 0)}
+                              className="w-20 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                          </td>
+                          <td className="py-2 text-right">
+                            <button type="button"
+                              onClick={() => setPlanResult((prev) => prev?.filter((_, idx) => idx !== i) ?? null)}
+                              className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/30">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {planResult.length === 0 && (
+                    <p className="py-6 text-center text-sm text-slate-400">항목이 없습니다. 다시 생성해보세요.</p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {/* 자동 포함 과목 안내 */}
+                  <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-4 dark:border-sky-900/40 dark:bg-sky-950/30">
+                    <p className="text-sm font-semibold text-sky-700 dark:text-sky-300">
+                      ✅ 현재 등록된 과목 {sorted.length}개의 우선순위·시험 범위·점수 정보가 자동으로 포함됩니다.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {sorted.slice(0, 6).map((item) => (
+                        <span key={item.id} className="rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/50 dark:text-sky-300">
+                          {item.subject_name}
+                          {item._examDate ? ` (${item._examDate})` : ""}
+                        </span>
+                      ))}
+                      {sorted.length > 6 && (
+                        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">+{sorted.length - 6}개</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 하루 목표 공부 시간 */}
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">하루 목표 공부 시간</label>
+                      <span className="text-sm font-bold text-violet-600 dark:text-violet-400">{planHours}시간</span>
+                    </div>
+                    <input type="range" min={1} max={12} value={planHours}
+                      onChange={(e) => setPlanHours(parseInt(e.target.value, 10))}
+                      className="w-full accent-violet-600" />
+                    <div className="mt-1 flex justify-between text-[10px] text-slate-400"><span>1시간</span><span>12시간</span></div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 푸터 */}
+            <div className="flex flex-shrink-0 gap-3 border-t border-slate-200 px-6 py-4 dark:border-slate-800">
+              {planLoading ? (
+                <div className="flex flex-1 items-center justify-center py-1 text-sm text-slate-400">생성 중...</div>
+              ) : planResult ? (
+                <>
+                  <button type="button" onClick={() => setPlanResult(null)}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    ← 다시 설정
+                  </button>
+                  <button type="button" onClick={handleGeneratePlan}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    🔄 다시 생성
+                  </button>
+                  <button type="button" onClick={handleAddPlans} disabled={planSaving || planResult.length === 0}
+                    className="flex-1 rounded-3xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    {planSaving ? "저장 중..." : `캘린더에 추가 (${planResult.length}개)`}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" onClick={() => { setPlanModalOpen(false); setPlanResult(null); }}
+                    className="rounded-3xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                    취소
+                  </button>
+                  <button type="button" onClick={handleGeneratePlan} disabled={sorted.length === 0}
+                    className="flex-1 rounded-3xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    계획 생성
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

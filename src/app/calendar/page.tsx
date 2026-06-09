@@ -21,7 +21,7 @@ type ScheduleItem = { id: string; subject: string; weekday: number; period: stri
 type ExamEvent = {
   id: string;
   subject_name: string;
-  exam_type: "midterm" | "final" | "quiz";
+  exam_type: "midterm" | "final" | "quiz" | "study";
   exam_date: string;
   exam_range: string;
   notes: string;
@@ -198,8 +198,9 @@ export default function CalendarPage() {
     });
   }, [selectedDate, planner, examEvents]);
 
-  const selectedTasks = useMemo(() => planner.filter((t) => t.due_date === selectedDate),    [planner, selectedDate]);
-  const selectedExams = useMemo(() => examEvents.filter((e) => formatDateKey(new Date(e.exam_date)) === selectedDate), [examEvents, selectedDate]);
+  const selectedTasks = useMemo(() => planner.filter((t) => t.due_date === selectedDate), [planner, selectedDate]);
+  const selectedExams = useMemo(() => examEvents.filter((e) => e.exam_type !== "study" && formatDateKey(new Date(e.exam_date)) === selectedDate), [examEvents, selectedDate]);
+  const selectedStudyPlans = useMemo(() => examEvents.filter((e) => e.exam_type === "study" && formatDateKey(new Date(e.exam_date)) === selectedDate), [examEvents, selectedDate]);
 
   const upcomingItems = useMemo(() => {
     const tasks = planner.filter((t) => !t.is_completed).map((t) => ({
@@ -207,7 +208,9 @@ export default function CalendarPage() {
       days: dayDiff(t.due_date),
     }));
     const exams = examEvents.map((e) => ({
-      id: e.id, type: "시험" as const, title: e.subject_name,
+      id: e.id,
+      type: (e.exam_type === "study" ? "공부계획" : "시험") as "시험" | "공부계획",
+      title: e.subject_name,
       days: dayDiff(e.exam_date),
     }));
     return [...tasks, ...exams]
@@ -327,7 +330,11 @@ export default function CalendarPage() {
             </span>
           ))}
           {visibleExams.map((e) => (
-            <span key={e.id} className={`truncate rounded px-1 py-0.5 text-[10px] font-medium ${isToday ? "bg-pink-400 text-white" : "bg-pink-100 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300"}`}>
+            <span key={e.id} className={`truncate rounded px-1 py-0.5 text-[10px] font-medium ${
+              e.exam_type === "study"
+                ? isToday ? "bg-emerald-400 text-white" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
+                : isToday ? "bg-pink-400 text-white" : "bg-pink-100 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300"
+            }`}>
               {e.subject_name}
             </span>
           ))}
@@ -371,6 +378,7 @@ export default function CalendarPage() {
             <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-slate-400">
               <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-sky-500" /> 과제</span>
               <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-pink-500" /> 시험</span>
+              <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500" /> AI 공부</span>
             </div>
 
             {/* 월/주 네비게이션 (중앙) */}
@@ -442,7 +450,11 @@ export default function CalendarPage() {
                           </span>
                         ))}
                         {exams.map((e) => (
-                          <span key={e.id} className="truncate rounded px-1 py-0.5 text-[10px] font-medium bg-pink-100 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300">
+                          <span key={e.id} className={`truncate rounded px-1 py-0.5 text-[10px] font-medium ${
+                            e.exam_type === "study"
+                              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
+                              : "bg-pink-100 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300"
+                          }`}>
                             {e.subject_name}
                           </span>
                         ))}
@@ -471,6 +483,25 @@ export default function CalendarPage() {
             </p>
 
             <div className="mt-5 space-y-5">
+              {/* AI 공부 계획 */}
+              {selectedStudyPlans.length > 0 && (
+                <div>
+                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">AI 공부 계획</p>
+                  <div className="mt-3 space-y-3">
+                    {selectedStudyPlans.map((plan) => (
+                      <div key={plan.id} className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4 dark:border-emerald-900/40 dark:bg-emerald-950/20">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-semibold text-slate-900 dark:text-slate-100">{plan.subject_name}</p>
+                          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300">AI 공부</span>
+                        </div>
+                        {plan.exam_range ? <p className="mt-2 text-xs text-gray-500 dark:text-slate-400">{plan.exam_range}</p> : null}
+                        {plan.notes      ? <p className="mt-1 text-xs text-gray-500 dark:text-slate-400">예상 시간: {plan.notes}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* 시험 일정 */}
               <div>
                 <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">시험 일정</p>

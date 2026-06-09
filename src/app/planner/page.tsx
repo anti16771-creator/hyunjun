@@ -93,6 +93,12 @@ export default function PlannerPage() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType]       = useState<"success" | "error">("success");
 
+  // AI assistant
+  const [aiPanelItem, setAiPanelItem] = useState<PlannerItem | null>(null);
+  const [aiContent, setAiContent]     = useState("");
+  const [aiLoading, setAiLoading]     = useState(false);
+
+
   const titleRef = useRef<HTMLInputElement>(null);
 
   const showToast = useCallback((msg: string, type: "success" | "error" = "success") => {
@@ -195,11 +201,50 @@ export default function PlannerPage() {
     persistMeta({ ...taskMeta, [id]: { ...cur, memo } });
   };
 
+  const handleAIHelp = async (item: PlannerItem) => {
+    const meta = taskMeta[item.id] ?? { subject: "", priority: "normal" as Priority, memo: "" };
+    setAiPanelItem(item);
+    setAiContent("");
+    setAiLoading(true);
+    try {
+      const res = await fetch("/api/ai-assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: item.title,
+          subject: meta.subject,
+          dueDate: item.due_date,
+          memo: meta.memo,
+        }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        accumulated += decoder.decode(value, { stream: true });
+        setAiContent(accumulated);
+      }
+    } catch {
+      setAiContent("AI 도움 생성에 실패했습니다. 잠시 후 다시 시도해주세요.");
+      showToast("AI 도움 생성에 실패했습니다.", "error");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   // ─── Derived values ──────────────────────────────────────────────────────────
-  const totalCount     = planner.length;
-  const completedCount = useMemo(() => planner.filter((i) => i.is_completed).length, [planner]);
-  const incompleteCount = totalCount - completedCount;
-  const completionPct  = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
+  // 완료됐거나 아직 마감 안 지난 항목만 카운트 (목록 "전체" 탭과 동일 기준)
+  const visibleItems    = useMemo(
+    () => planner.filter((i) => i.is_completed || dayDiff(i.due_date) >= 0),
+    [planner],
+  );
+  const completedCount  = useMemo(() => visibleItems.filter((i) => i.is_completed).length, [visibleItems]);
+  const incompleteCount = useMemo(() => visibleItems.filter((i) => !i.is_completed).length, [visibleItems]);
+  const totalCount      = completedCount + incompleteCount;
+  const completionPct   = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
 
   const todayDeadlines = useMemo(
     () => planner.filter((i) => !i.is_completed && dayDiff(i.due_date) === 0),
@@ -245,29 +290,29 @@ export default function PlannerPage() {
   return (
     <div className="space-y-6">
       {/* ── 요약 헤더 ────────────────────────────────── */}
-      <section className="rounded-[2rem] bg-white p-6 shadow-sm sm:p-8 dark:bg-slate-900">
+      <section className="rounded-[2rem] bg-white p-4 shadow-sm sm:p-6 dark:bg-slate-900">
         <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">📋 플래너</p>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">과제 마감일 관리</h1>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">📋 플래너</p>
+          <h1 className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">과제 마감일 관리</h1>
         </div>
 
         {/* 3 stat 카드 */}
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-4 grid grid-cols-3 gap-2">
           {([
             { label: "전체",   value: totalCount,      color: "text-slate-900 dark:text-slate-100" },
             { label: "미완료", value: incompleteCount,  color: "text-rose-600 dark:text-rose-400" },
             { label: "완료",   value: completedCount,   color: "text-emerald-600 dark:text-emerald-400" },
           ] as const).map((s) => (
-            <div key={s.label} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 py-4 text-center dark:border-slate-700 dark:bg-slate-950">
+            <div key={s.label} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 py-3 text-center dark:border-slate-700 dark:bg-slate-950">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{s.label}</p>
-              <p className={`mt-1 text-2xl font-bold ${s.color}`}>{s.value}</p>
+              <p className={`mt-1 text-xl font-bold ${s.color}`}>{s.value}</p>
             </div>
           ))}
         </div>
 
         {/* 완료율 프로그레스 바 */}
-        <div className="mt-4">
-          <div className="flex items-center justify-between text-sm">
+        <div className="mt-3">
+          <div className="flex items-center justify-between text-xs">
             <span className="text-slate-500 dark:text-slate-400">전체 완료율</span>
             <span className="font-semibold text-slate-700 dark:text-slate-300">{completionPct}%</span>
           </div>
@@ -281,9 +326,9 @@ export default function PlannerPage() {
 
         {/* 오늘 마감 알림 배너 */}
         {todayDeadlines.length > 0 && (
-          <div className="mt-4 flex items-start gap-3 rounded-[1.25rem] border border-rose-200 bg-rose-50 px-4 py-3 dark:border-rose-900/40 dark:bg-rose-950/30">
-            <span className="mt-0.5 flex-shrink-0 text-base">🔴</span>
-            <p className="text-sm font-semibold text-rose-700 dark:text-rose-300">
+          <div className="mt-3 flex items-start gap-2 rounded-[1.25rem] border border-rose-200 bg-rose-50 px-3 py-2.5 dark:border-rose-900/40 dark:bg-rose-950/30">
+            <span className="mt-0.5 flex-shrink-0 text-sm">🔴</span>
+            <p className="text-xs font-semibold text-rose-700 dark:text-rose-300">
               오늘 마감 {todayDeadlines.length}개&nbsp;—&nbsp;
               {todayDeadlines.map((i) => i.title || "제목 없음").join(", ")}
             </p>
@@ -535,6 +580,14 @@ export default function PlannerPage() {
                           className="mt-2 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                         />
                         <div className="mt-3 flex flex-wrap items-center gap-2">
+                          {/* AI 도움받기 */}
+                          <button
+                            type="button"
+                            onClick={() => handleAIHelp(item)}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100 dark:border-violet-900/40 dark:bg-violet-950/30 dark:text-violet-300"
+                          >
+                            ✨ AI 도움받기
+                          </button>
                           {/* 완료 체크 */}
                           <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
                             <input
@@ -563,6 +616,84 @@ export default function PlannerPage() {
           )}
         </div>
       </section>
+
+      {/* ── AI 과제 도우미 패널 ───────────────────────── */}
+      {aiPanelItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/40"
+          onClick={(e) => { if (e.target === e.currentTarget) setAiPanelItem(null); }}
+        >
+          <div className="flex w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl dark:bg-slate-900">
+            {/* 패널 헤더 */}
+            <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">✨ AI 과제 도우미</p>
+                <h2 className="mt-0.5 truncate text-base font-semibold text-slate-900 dark:text-slate-100">
+                  {aiPanelItem.title}
+                </h2>
+                {taskMeta[aiPanelItem.id]?.subject && (
+                  <p className="text-sm text-sky-600 dark:text-sky-400">{taskMeta[aiPanelItem.id].subject}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiPanelItem(null)}
+                className="ml-4 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            {/* 콘텐츠 영역 */}
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {aiLoading && !aiContent ? (
+                /* 스켈레톤 로딩 */
+                <div className="space-y-4">
+                  {[0.6, 0.9, 0.5, 0.75].map((w, i) => (
+                    <div key={i} className="space-y-2">
+                      <div className="h-4 w-1/3 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+                      <div className={`h-3 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700`} style={{ width: `${w * 100}%` }} />
+                      <div className="h-3 w-4/5 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                  {aiContent}
+                  {aiLoading && (
+                    <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-violet-500" />
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 푸터 액션 */}
+            {!aiLoading && aiContent && (
+              <div className="flex flex-shrink-0 gap-3 border-t border-slate-200 px-6 py-4 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => handleAIHelp(aiPanelItem)}
+                  className="flex-1 rounded-3xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  🔄 다시 생성
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleMemoChange(aiPanelItem.id, aiContent);
+                    showToast("AI 내용을 메모에 저장했습니다.", "success");
+                  }}
+                  className="flex-1 rounded-3xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700"
+                >
+                  💾 메모에 저장
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── 삭제 확인 모달 ───────────────────────────── */}
       {deleteConfirmId && (
