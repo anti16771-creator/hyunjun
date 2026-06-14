@@ -25,7 +25,15 @@ type AnswerState = {
   selfCorrect: boolean | null;
 };
 
-type QuizRecord = { date: string; source: string; score: number; total: number };
+type QuizRecord = {
+  id: string;
+  date: string;
+  source: string;
+  score: number;
+  total: number;
+  questions?: Question[];
+  answerStates?: AnswerState[];
+};
 
 const QUIZ_HISTORY_KEY = "smartgrade_quiz_history";
 
@@ -49,6 +57,18 @@ function computeScore(questions: Question[], states: AnswerState[]) {
   const total = questions.length;
   const correct = questions.filter((q, i) => isCorrect(q, states[i])).length;
   return { correct, total };
+}
+
+function scoreColorCls(pct: number) {
+  if (pct >= 80) return { text: "text-emerald-600 dark:text-emerald-400", badge: "border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-900/30 dark:bg-emerald-950/30 dark:text-emerald-300" };
+  if (pct >= 60) return { text: "text-amber-600 dark:text-amber-400",   badge: "border-amber-100 bg-amber-50 text-amber-700 dark:border-amber-900/30 dark:bg-amber-950/30 dark:text-amber-300" };
+  return            { text: "text-rose-600 dark:text-rose-400",           badge: "border-rose-100 bg-rose-50 text-rose-700 dark:border-rose-900/30 dark:bg-rose-950/30 dark:text-rose-300" };
+}
+
+function shuffleQuestion(q: Question): Question {
+  if (q.type !== "multiple" || !q.options || q.options.length === 0) return q;
+  const resolvedAns = resolveAnswer(q);
+  return { ...q, options: [...q.options].sort(() => Math.random() - 0.5), answer: resolvedAns };
 }
 
 export default function QuizPage() {
@@ -85,6 +105,7 @@ export default function QuizPage() {
   // History
   const [history, setHistory] = useState<QuizRecord[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [wrongViewRecord, setWrongViewRecord] = useState<QuizRecord | null>(null);
 
   // Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -100,7 +121,12 @@ export default function QuizPage() {
 
   useEffect(() => {
     try {
-      setHistory(JSON.parse(localStorage.getItem(QUIZ_HISTORY_KEY) || "[]"));
+      const stored: QuizRecord[] = JSON.parse(localStorage.getItem(QUIZ_HISTORY_KEY) || "[]");
+      const withIds = stored.map((r) => r.id ? r : { ...r, id: Math.random().toString(36).slice(2) });
+      setHistory(withIds);
+      if (withIds.some((r, i) => !stored[i]?.id)) {
+        localStorage.setItem(QUIZ_HISTORY_KEY, JSON.stringify(withIds));
+      }
     } catch {}
   }, []);
 
@@ -232,10 +258,13 @@ export default function QuizPage() {
     } else {
       const { correct, total } = computeScore(questions, answerStates);
       const record: QuizRecord = {
+        id: Math.random().toString(36).slice(2),
         date: new Date().toISOString().slice(0, 10),
         source: quizSource,
         score: correct,
         total,
+        questions: [...questions],
+        answerStates: [...answerStates],
       };
       const newHistory = [record, ...history].slice(0, 30);
       setHistory(newHistory);
@@ -250,6 +279,26 @@ export default function QuizPage() {
     setCurrentInput("");
     setShowWrong(false);
     setPhase("playing");
+  };
+
+  const handleRetryFromHistory = (record: QuizRecord) => {
+    if (!record.questions?.length) return;
+    const shuffled = record.questions.map(shuffleQuestion);
+    setQuestions(shuffled);
+    setAnswerStates(shuffled.map(() => ({ userAnswer: "", submitted: false, selfCorrect: null })));
+    setCurrentIdx(0);
+    setCurrentInput("");
+    setQuizSource(record.source);
+    setShowWrong(false);
+    setPhase("playing");
+  };
+
+  const handleDeleteHistoryRecord = (id: string) => {
+    if (!window.confirm("정말 삭제하시겠습니까?")) return;
+    const newHistory = history.filter((r) => r.id !== id);
+    setHistory(newHistory);
+    localStorage.setItem(QUIZ_HISTORY_KEY, JSON.stringify(newHistory));
+    showToast("삭제되었습니다.", "success");
   };
 
   const handleNewQuiz = () => {
@@ -290,47 +339,106 @@ export default function QuizPage() {
           </div>
 
           {showHistory && history.length > 0 && (
-            <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-50 dark:bg-slate-950">
-                  <tr>
-                    {["날짜", "출처", "점수"].map((h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-400"
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {history.slice(0, 10).map((r, i) => (
-                    <tr key={i} className="bg-white dark:bg-slate-900">
-                      <td className="px-4 py-2.5 text-slate-500 dark:text-slate-400">{r.date}</td>
-                      <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
-                        {r.source}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className={`font-bold ${
-                            r.score / r.total >= 0.7
-                              ? "text-emerald-600 dark:text-emerald-400"
-                              : "text-rose-600 dark:text-rose-400"
-                          }`}
-                        >
-                          {r.score}/{r.total}
-                        </span>
-                        <span className="ml-1.5 text-slate-400">
-                          ({Math.round((r.score / r.total) * 100)}점)
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="mt-4 space-y-2">
+              {history.slice(0, 20).map((r) => {
+                const pct   = Math.round((r.score / r.total) * 100);
+                const color = scoreColorCls(pct);
+                const wrongCount = r.questions && r.answerStates
+                  ? r.questions.filter((q, i) => !isCorrect(q, r.answerStates![i])).length
+                  : 0;
+                return (
+                  <div key={r.id}
+                    className="group flex flex-wrap items-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{r.source}</p>
+                      <p className="text-xs text-slate-400 dark:text-slate-500">{r.date}</p>
+                    </div>
+                    <span className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-bold ${color.badge}`}>
+                      {r.score}/{r.total} · {pct}%
+                    </span>
+                    {wrongCount > 0 && (
+                      <button type="button" onClick={() => setWrongViewRecord(r)}
+                        className="shrink-0 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900/30 dark:bg-rose-950/30 dark:text-rose-300">
+                        오답 {wrongCount}개
+                      </button>
+                    )}
+                    {r.questions?.length ? (
+                      <button type="button" onClick={() => handleRetryFromHistory(r)}
+                        className="shrink-0 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                        다시 풀기
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => handleDeleteHistoryRecord(r.id)}
+                      className="shrink-0 rounded p-1 text-slate-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 dark:text-slate-600 dark:hover:bg-red-950/30 dark:hover:text-red-400">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
+
+          {/* 오답 확인 모달 */}
+          {wrongViewRecord && (() => {
+            const wrongItems = wrongViewRecord.questions!
+              .map((q, i) => ({ q, s: wrongViewRecord.answerStates![i], i }))
+              .filter(({ q, s }) => !isCorrect(q, s));
+            return (
+              <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-8"
+                onClick={(e) => { if (e.target === e.currentTarget) setWrongViewRecord(null); }}>
+                <div className="w-full max-w-xl rounded-[2rem] bg-white p-6 shadow-2xl dark:bg-slate-900">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-rose-500">❌ 오답 확인</p>
+                      <p className="mt-0.5 text-base font-semibold text-slate-900 dark:text-slate-100">
+                        틀린 문제 {wrongItems.length}개
+                      </p>
+                    </div>
+                    <button type="button" onClick={() => setWrongViewRecord(null)}
+                      className="rounded-full px-3 py-2 text-sm font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+                      닫기
+                    </button>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-slate-400 dark:text-slate-500">{wrongViewRecord.source} · {wrongViewRecord.date}</p>
+
+                  <div className="mt-4 space-y-4">
+                    {wrongItems.map(({ q, s, i }) => (
+                      <div key={i} className="rounded-2xl border border-rose-100 bg-rose-50/30 p-4 dark:border-rose-900/20 dark:bg-rose-950/10">
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="text-xs font-bold text-rose-500">{i + 1}번</span>
+                          <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${
+                            q.type === "multiple"
+                              ? "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300"
+                              : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-300"
+                          }`}>{q.type === "multiple" ? "객관식" : "주관식"}</span>
+                        </div>
+                        <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{q.question}</p>
+                        <div className="mt-2.5 space-y-1">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            내 답변: <span className="font-semibold text-rose-600 dark:text-rose-400">{s.userAnswer || "(미제출)"}</span>
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            정답: <span className="font-semibold text-emerald-600 dark:text-emerald-400">{q.answer}</span>
+                          </p>
+                        </div>
+                        <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/50 px-4 py-3 dark:border-sky-900/30 dark:bg-sky-950/20">
+                          <p className="text-xs font-semibold text-sky-500">💡 해설</p>
+                          <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300">{q.explanation}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button type="button" onClick={() => { handleRetryFromHistory(wrongViewRecord); setWrongViewRecord(null); }}
+                    className="mt-5 w-full rounded-3xl bg-sky-600 py-3 text-sm font-semibold text-white transition hover:bg-sky-700">
+                    🔄 이 퀴즈 다시 풀기
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </section>
 
         {/* Input method */}

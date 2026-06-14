@@ -137,6 +137,9 @@ export default function Home() {
   const [schedule, setSchedule]               = useState<{ id: string; subject: string; weekday: number; period: string }[]>([]);
   const [studyLogs, setStudyLogs]             = useState<{ id: string; date: string; minutes: number; subject: string }[]>([]);
   const [todayAgendaCount, setTodayAgendaCount] = useState(0);
+  const [plannerItems, setPlannerItems]         = useState<{ id: string; title: string; due_date: string; is_completed: boolean }[]>([]);
+  const [examEvents, setExamEvents]             = useState<{ id: string; subject_name: string; exam_date: string; exam_type: string }[]>([]);
+  const [showAllAgenda, setShowAllAgenda]       = useState(false);
 
   // 폼 상태
   const [subject, setSubject]   = useState("");
@@ -193,6 +196,28 @@ export default function Home() {
     }, {});
     return Object.entries(grouped).map(([subject, minutes]) => ({ subject, minutes })).sort((a, b) => b.minutes - a.minutes);
   }, [studyLogs, todayKey]);
+
+  type AgendaItem =
+    | { kind: "class";   period: string; subject: string; sortKey: number }
+    | { kind: "planner"; title: string;  sortKey: number }
+    | { kind: "exam";    subject_name: string; exam_type: string; sortKey: number };
+
+  const todayAgendaItems = useMemo<AgendaItem[]>(() => {
+    const items: AgendaItem[] = [];
+    schedule
+      .filter((s) => s.weekday === todayWeekday)
+      .forEach((s) => {
+        const n = parseInt(s.period) || 99;
+        items.push({ kind: "class", period: s.period, subject: s.subject, sortKey: n });
+      });
+    plannerItems
+      .filter((p) => p.due_date === todayKey && !p.is_completed)
+      .forEach((p) => items.push({ kind: "planner", title: p.title, sortKey: 200 }));
+    examEvents
+      .filter((e) => e.exam_date === todayKey)
+      .forEach((e) => items.push({ kind: "exam", subject_name: e.subject_name, exam_type: e.exam_type, sortKey: 100 }));
+    return items.sort((a, b) => a.sortKey - b.sortKey);
+  }, [schedule, plannerItems, examEvents, todayWeekday, todayKey]);
 
   const focusTargetMinutes = 180;
   const todayFocusMinutes  = useMemo(
@@ -309,8 +334,22 @@ export default function Home() {
         setStudyLogs([]);
       }
 
-      const plannerDue = (plannerRes.data ?? []).filter((i: any) => String(i.due_date) === todayKey).length;
-      const examDue    = (examRes.data ?? []).filter((i: any) => String(i.exam_date) === todayKey).length;
+      const rawPlanner = (plannerRes.data ?? []).map((i: any) => ({
+        id: String(i.id),
+        title: String(i.title ?? ""),
+        due_date: String(i.due_date ?? ""),
+        is_completed: Boolean(i.is_completed),
+      }));
+      const rawExam = (examRes.data ?? []).map((i: any) => ({
+        id: String(i.id),
+        subject_name: String(i.subject_name ?? ""),
+        exam_date: String(i.exam_date ?? ""),
+        exam_type: String(i.exam_type ?? ""),
+      }));
+      setPlannerItems(rawPlanner);
+      setExamEvents(rawExam);
+      const plannerDue = rawPlanner.filter((i) => i.due_date === todayKey).length;
+      const examDue    = rawExam.filter((i) => i.exam_date === todayKey).length;
       setTodayAgendaCount(plannerDue + examDue);
       setError("");
       setLastSyncAt(new Date());
@@ -684,6 +723,58 @@ export default function Home() {
                   <Link href="/priority" className="flex flex-1 items-center justify-center gap-1.5 rounded-3xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700">
                     🔥 우선순위
                   </Link>
+                </div>
+              </div>
+
+              {/* 오늘 일정 */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-950">
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">오늘 일정</p>
+                <div className="mt-3 space-y-2">
+                  {todayAgendaItems.length === 0 ? (
+                    <p className="py-2 text-xs text-slate-400 dark:text-slate-500">오늘 등록된 일정이 없어요</p>
+                  ) : (
+                    <>
+                      {(showAllAgenda ? todayAgendaItems : todayAgendaItems.slice(0, 5)).map((item, idx) => {
+                        if (item.kind === "class") {
+                          const color = getSubjectColor(item.subject);
+                          return (
+                            <div key={idx} className="flex items-center gap-2">
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${color.dotBg}`} />
+                              <span className="shrink-0 text-[11px] font-semibold text-slate-400 dark:text-slate-500">{item.period}</span>
+                              <span className="mx-0.5 text-[10px] text-slate-300 dark:text-slate-600">|</span>
+                              <span className="truncate text-xs font-medium text-slate-700 dark:text-slate-300">{item.subject}</span>
+                            </div>
+                          );
+                        }
+                        if (item.kind === "exam") {
+                          return (
+                            <div key={idx} className="flex items-center gap-2">
+                              <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" />
+                              <span className="shrink-0 text-[11px] font-semibold text-amber-500">D-day</span>
+                              <span className="mx-0.5 text-[10px] text-slate-300 dark:text-slate-600">|</span>
+                              <span className="truncate text-xs font-medium text-slate-700 dark:text-slate-300">{item.subject_name}</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={idx} className="flex items-center gap-2">
+                            <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500" />
+                            <span className="shrink-0 text-[11px] font-semibold text-rose-500">오늘 마감</span>
+                            <span className="mx-0.5 text-[10px] text-slate-300 dark:text-slate-600">|</span>
+                            <span className="truncate text-xs font-medium text-slate-700 dark:text-slate-300">{item.title}</span>
+                          </div>
+                        );
+                      })}
+                      {todayAgendaItems.length > 5 && (
+                        <button
+                          onClick={() => setShowAllAgenda((v) => !v)}
+                          className="mt-1 text-[11px] font-semibold text-sky-500 hover:text-sky-600 dark:text-sky-400 dark:hover:text-sky-300"
+                        >
+                          {showAllAgenda ? "접기" : `더보기 +${todayAgendaItems.length - 5}`}
+                        </button>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
 

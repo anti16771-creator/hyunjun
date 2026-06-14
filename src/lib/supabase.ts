@@ -73,6 +73,11 @@ export async function getUserTimetable(userId: string) {
     .order("period", { ascending: true });
 }
 
+export async function deleteExamEvent(id: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("exam_events").delete().eq("id", id);
+}
+
 export async function getExamEvents(userId: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
   return supabase
@@ -129,6 +134,11 @@ export async function createStudyCalendarEvent(item: {
     notes: `${item.duration}분`,
     created_at: new Date().toISOString(),
   }]);
+}
+
+export async function updateStudyPlanNotes(id: string, notes: string) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase.from("exam_events").update({ notes }).eq("id", id);
 }
 
 export async function getStudyPlansForDate(userId: string, date: string) {

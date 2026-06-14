@@ -8,7 +8,7 @@ import {
 import LoadingCard from "@/src/components/LoadingCard";
 import ToastMessage from "@/src/components/ToastMessage";
 import { useAuth } from "@/src/context/AuthContext";
-import { createStudyLog, deleteStudyLog, getStudyLogs, getStudyPlansForDate, getUserTimetableSubjects } from "@/src/lib/supabase";
+import { createStudyLog, deleteExamEvent, deleteStudyLog, getStudyLogs, getStudyPlansForDate, getUserTimetableSubjects, updateStudyPlanNotes } from "@/src/lib/supabase";
 
 const DEFAULT_FOCUS_SECS = 25 * 60;
 const DEFAULT_BREAK_SECS =  5 * 60;
@@ -56,6 +56,23 @@ function formatTimeLabel(v?: string) {
   if (!v) return "--:--";
   try { return new Date(v).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }); }
   catch { return "--:--"; }
+}
+
+// ─── 공부 계획 시간 파싱/포맷 ────────────────────────────────────────────────
+function parseNotesMinutes(notes: string): number {
+  if (!notes) return 0;
+  const h = notes.match(/(\d+)\s*시간/);
+  const m = notes.match(/(\d+)\s*분/);
+  return (h ? parseInt(h[1]) : 0) * 60 + (m ? parseInt(m[1]) : 0);
+}
+
+function formatMinutes(mins: number): string {
+  if (mins <= 0) return "0분";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h}시간 ${m}분`;
+  if (h > 0) return `${h}시간`;
+  return `${m}분`;
 }
 
 // ─── 히스토리 헬퍼 ───────────────────────────────────────────────────────────
@@ -262,10 +279,25 @@ export default function TimerPage() {
     if (dur === 0) { showToast("저장할 집중 시간이 없습니다.", "error"); return; }
     if (!selectedSubject) { showToast("먼저 집중 과목을 선택하세요.", "error"); return; }
     setSaving(true);
-    const res = await createStudyLog({ user_id: user.id, subject: selectedSubject, duration_seconds: dur, minutes: Math.round(dur / 60) || 1, date: todayKey });
-    if (res.error) showToast("저장에 실패했습니다.", "error");
-    else { await fetchLogs(); resetTimer(); showToast("저장 완료! 🎉", "success"); }
-    setSaving(false);
+    try {
+      const res = await createStudyLog({ user_id: user.id, subject: selectedSubject, duration_seconds: dur, minutes: Math.round(dur / 60) || 1, date: todayKey });
+      if (res.error) { showToast("저장에 실패했습니다.", "error"); return; }
+
+      // 매칭되는 AI 추천 학습 계획에서 공부 시간 차감
+      const matchingPlan = studyPlans.find((p) => p.subject_name === selectedSubject);
+      if (matchingPlan) {
+        const studiedMins = Math.round(dur / 60) || 1;
+        const newMins = Math.max(0, parseNotesMinutes(matchingPlan.notes) - studiedMins);
+        await updateStudyPlanNotes(matchingPlan.id, formatMinutes(newMins));
+        await fetchStudyPlans();
+      }
+
+      await fetchLogs();
+      resetTimer();
+      showToast("저장 완료! 🎉", "success");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleDeleteRecord = async (id: string) => {
@@ -275,6 +307,13 @@ export default function TimerPage() {
     if (res.error) showToast("기록 삭제에 실패했습니다.", "error");
     else { await fetchLogs(); showToast("기록이 삭제되었습니다.", "success"); }
     setSaving(false);
+  };
+
+  const handleDeletePlan = async (id: string) => {
+    if (!window.confirm("이 공부 계획을 삭제하시겠습니까?")) return;
+    const res = await deleteExamEvent(id);
+    if (res.error) showToast("삭제에 실패했습니다.", "error");
+    else { await fetchStudyPlans(); showToast("삭제되었습니다.", "success"); }
   };
 
   // ─── Ring / display ───────────────────────────────────────────────────────
@@ -574,33 +613,64 @@ export default function TimerPage() {
         </div>
       </div>
 
-      {/* ── 오늘의 공부 계획 ─────────────────────────────── */}
+      {/* ── AI 추천 학습 일정 ────────────────────────────── */}
       {studyPlans.length > 0 && (
         <section className="rounded-[2rem] bg-white p-5 shadow-sm dark:bg-slate-900">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-500 dark:text-emerald-400">오늘의 공부 계획</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">오늘의 공부 계획</p>
           <h2 className="mt-0.5 text-base font-semibold text-slate-900 dark:text-slate-100">AI 추천 학습 일정</h2>
-          <div className="mt-4 space-y-3">
-            {studyPlans.map((plan) => (
-              <div key={plan.id}
-                className="flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/40 dark:bg-emerald-950/30">
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-slate-900 dark:text-slate-100 truncate">{plan.subject_name}</p>
-                  <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400 truncate">{plan.exam_range}</p>
+          <div className="mt-3 divide-y divide-slate-100 dark:divide-slate-800">
+            {studyPlans.map((plan) => {
+              const totalMins      = parseNotesMinutes(plan.notes);
+              const isActive       = selectedSubject === plan.subject_name;
+              const elapsedMins    = isActive ? Math.floor(currentSessionSecs / 60) : 0;
+              const remainingMins  = Math.max(0, totalMins - elapsedMins);
+              const isDone         = totalMins > 0 && remainingMins <= 0;
+
+              return (
+                <div key={plan.id}
+                  className={`flex items-center justify-between gap-3 py-3 transition-opacity ${isDone ? "opacity-40" : ""}`}>
+                  <div className="min-w-0 flex-1">
+                    <p className={`text-sm font-bold text-slate-900 dark:text-slate-100 ${isDone ? "line-through" : ""}`}>
+                      {isDone && (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="mr-1 inline-block text-emerald-500"><polyline points="20 6 9 17 4 12"/></svg>
+                      )}
+                      {plan.subject_name}
+                    </p>
+                    {plan.exam_range ? (
+                      <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500">{plan.exam_range}</p>
+                    ) : null}
+                  </div>
+
+                  <div className="group/item flex shrink-0 items-center gap-2">
+                    {isDone ? (
+                      <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-400">완료</span>
+                    ) : (
+                      <span className={`tabular-nums text-xs font-bold ${isActive && timerRunning ? "text-sky-600 dark:text-sky-400" : "text-slate-400 dark:text-slate-500"}`}>
+                        {totalMins > 0 ? formatMinutes(remainingMins) : plan.notes}
+                      </span>
+                    )}
+                    {!isDone && (
+                      <button type="button"
+                        onClick={() => {
+                          setSubjects((prev) => prev.includes(plan.subject_name) ? prev : [...prev, plan.subject_name]);
+                          setSelectedSubject(plan.subject_name);
+                          window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                        className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
+                        타이머 시작
+                      </button>
+                    )}
+                    <button type="button"
+                      onClick={() => handleDeletePlan(plan.id)}
+                      className="rounded p-1 text-slate-300 opacity-0 transition group-hover/item:opacity-100 hover:bg-red-50 hover:text-red-500 dark:text-slate-600 dark:hover:bg-red-950/30 dark:hover:text-red-400">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-                <span className="shrink-0 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300">
-                  {plan.notes}
-                </span>
-                <button type="button"
-                  onClick={() => {
-                    setSubjects((prev) => prev.includes(plan.subject_name) ? prev : [...prev, plan.subject_name]);
-                    setSelectedSubject(plan.subject_name);
-                    window.scrollTo({ top: 0, behavior: "smooth" });
-                  }}
-                  className="shrink-0 rounded-3xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">
-                  타이머 시작
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
