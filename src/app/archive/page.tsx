@@ -280,7 +280,7 @@ export default function ArchivePage() {
       } else {
         setNewSubjectName(""); setIsDirectInput(false);
         await fetchArchive();
-        setSelectedFolder({ subject_name: subject, grade_level: newGradeLevel, semester: newSemester, fileCount: 0 });
+        setSelectedFolder({ subject_name: subject, grade_level: newGradeLevel, semester: newSemester, fileCount: 0, user_id: user?.id ?? "" });
         showToast("폴더가 생성되었습니다!", "success");
       }
     } catch {
@@ -831,7 +831,7 @@ export default function ArchivePage() {
                 {folderFiles.map((item) => {
                   const kind = getFileKind(item.file_name ?? "");
                   return (
-                    <div key={item.id} className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+                    <div key={item.id} className="group flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
                       <FileKindIcon kind={kind} />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{item.file_name}</p>
@@ -844,10 +844,15 @@ export default function ArchivePage() {
                           className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
                           다운로드
                         </button>
-                        <button type="button" onClick={() => setDeleteConfirmItem(item)}
-                          className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-300">
-                          삭제
-                        </button>
+                        {item.user_id === user?.id && (
+                          <button type="button" onClick={() => setDeleteConfirmItem(item)}
+                            title="삭제"
+                            className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-rose-950/30">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                            </svg>
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

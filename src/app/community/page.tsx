@@ -280,14 +280,16 @@ export default function CommunityPage() {
 
     if (editingPost) {
       // 수정
+      console.log("[community] 수정 시도:", { postId: editingPost.id, userId: user.id, post_user_id: editingPost.user_id, 일치여부: editingPost.user_id === user.id });
       const res = await updateCommunityPost(editingPost.id, {
         title: postTitle.trim(), content: finalContent,
         file_url: fileUrl, file_name: fileName,
       }, user.id);
       if (res.error) {
-        console.error("updateCommunityPost error", res.error);
+        console.error("[community] updateCommunityPost 에러:", res.error);
         showToast(res.error.message || "수정에 실패했습니다.", "error");
       } else if (!res.data || res.data.length === 0) {
+        console.warn("[community] 수정된 행 없음 - RLS 권한 차단 가능성:", { postId: editingPost.id, userId: user.id });
         showToast("수정 권한이 없거나 게시글을 찾을 수 없습니다.", "error");
       } else {
         handleCloseWrite();
@@ -414,12 +416,14 @@ export default function CommunityPage() {
   // ─── 삭제 ────────────────────────────────────────────────────────────────
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmPost) return;
+    console.log("[community] 삭제 시도:", { postId: deleteConfirmPost.id, userId: user?.id, post_user_id: deleteConfirmPost.user_id, 일치여부: deleteConfirmPost.user_id === user?.id });
     setDeleting(true);
     const res = await deleteCommunityPost(deleteConfirmPost.id, user?.id);
     if (res.error) {
-      console.error("deleteCommunityPost error", res.error);
+      console.error("[community] deleteCommunityPost 에러:", res.error);
       showToast(res.error.message || "삭제에 실패했습니다.", "error");
     } else if (!res.data || res.data.length === 0) {
+      console.warn("[community] 삭제된 행 없음 - RLS 권한 차단 가능성:", { postId: deleteConfirmPost.id, userId: user?.id });
       showToast("삭제 권한이 없거나 이미 삭제된 게시글입니다.", "error");
     } else {
       if (selectedPost?.id === deleteConfirmPost.id) setSelectedPost(null);
@@ -643,14 +647,14 @@ export default function CommunityPage() {
                       <>
                         <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenWrite(post); }}
                           title="수정"
-                          className="rounded-full p-1.5 text-slate-400 opacity-0 transition hover:bg-sky-50 hover:text-sky-600 group-hover:opacity-100 dark:hover:bg-sky-950/30">
+                          className="rounded-full p-1.5 text-slate-400 transition hover:bg-sky-50 hover:text-sky-600 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-sky-950/30">
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                           </svg>
                         </button>
                         <button type="button" onClick={(e) => { e.stopPropagation(); setDeleteConfirmPost(post); }}
                           title="삭제"
-                          className="rounded-full p-1.5 text-slate-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/30">
+                          className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-rose-950/30">
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
                           </svg>
