@@ -659,12 +659,12 @@ export default function ArchivePage() {
                         <button
                           type="button"
                           onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
-                          className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[10px] font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300"
+                          className="rounded-full border border-sky-300 bg-sky-200 px-2.5 py-0.5 text-xs font-semibold text-sky-800 transition hover:bg-sky-300 dark:border-sky-700 dark:bg-sky-800/60 dark:text-sky-200 dark:hover:bg-sky-700/60"
                         >수정</button>
                         <button
                           type="button"
                           onClick={() => setDeleteFolderTarget(folder)}
-                          className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[10px] font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-300"
+                          className="rounded-full border border-rose-300 bg-rose-200 px-2.5 py-0.5 text-xs font-semibold text-rose-800 transition hover:bg-rose-300 dark:border-rose-700 dark:bg-rose-800/60 dark:text-rose-200 dark:hover:bg-rose-700/60"
                         >삭제</button>
                       </div>
                     </div>
