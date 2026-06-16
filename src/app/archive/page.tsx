@@ -655,19 +655,20 @@ export default function ArchivePage() {
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         {folder.fileCount === 0 ? "자료 없음" : `자료 ${folder.fileCount}개`}
                       </div>
-                      <div className="flex items-center gap-1 text-xs" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          type="button"
-                          onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
-                          className="font-medium text-sky-400 transition hover:text-sky-600 dark:text-sky-500 dark:hover:text-sky-300"
-                        >수정</button>
-                        <span className="text-slate-200 dark:text-slate-600">|</span>
-                        <button
-                          type="button"
-                          onClick={() => setDeleteFolderTarget(folder)}
-                          className="font-medium text-rose-400 transition hover:text-rose-600 dark:text-rose-500 dark:hover:text-rose-300"
-                        >삭제</button>
-                      </div>
+                      {folder.user_id === user?.id && (
+                        <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
+                            className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[10px] font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300"
+                          >수정</button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteFolderTarget(folder)}
+                            className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[10px] font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-300"
+                          >삭제</button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
