@@ -12,6 +12,7 @@ import {
   deleteArchiveMeta,
   getArchiveItems,
   getUserTimetableSubjects,
+  updateArchiveFolderName,
   uploadArchiveFile,
 } from "@/src/lib/supabase";
 
@@ -116,6 +117,7 @@ type FolderGroup = {
   grade_level: string;
   semester: string;
   fileCount: number;
+  user_id: string;
 };
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -155,6 +157,11 @@ export default function ArchivePage() {
   // 폴더 삭제 confirm + 우클릭 컨텍스트 메뉴
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<FolderGroup | null>(null);
   const [contextMenu, setContextMenu] = useState<{ folder: FolderGroup; x: number; y: number } | null>(null);
+
+  // 폴더 이름 인라인 편집
+  const [editingFolderKey, setEditingFolderKey] = useState<string | null>(null);
+  const [editSubjectName, setEditSubjectName] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   // Toast
   const [toastMessage, setToastMessage]       = useState<string | null>(null);
@@ -212,7 +219,7 @@ export default function ArchivePage() {
       }
       const key = `${item.subject_name}|${item.grade_level}|${item.semester}`;
       if (!map.has(key)) {
-        map.set(key, { subject_name: item.subject_name, grade_level: item.grade_level, semester: item.semester, fileCount: item.file_name ? 1 : 0 });
+        map.set(key, { subject_name: item.subject_name, grade_level: item.grade_level, semester: item.semester, fileCount: item.file_name ? 1 : 0, user_id: item.user_id });
       } else if (item.file_name) {
         map.get(key)!.fileCount += 1;
       }
@@ -376,7 +383,11 @@ export default function ArchivePage() {
         folderItems.filter((i) => i.file_url).map((i) => deleteArchiveFile(ARCHIVE_BUCKET, i.file_url!)),
       );
       // 2. DB 레코드 전체 삭제
-      await Promise.all(folderItems.map((i) => deleteArchiveMeta(i.id)));
+      const dbResults = await Promise.all(folderItems.map((i) => deleteArchiveMeta(i.id)));
+      const dbErrors = dbResults.filter((r) => r.error);
+      if (dbErrors.length > 0) {
+        console.error("[Archive] 폴더 DB 삭제 일부 실패:", dbErrors.map((r) => r.error));
+      }
       // 3. 선택된 폴더이면 해제
       if (
         selectedFolder?.subject_name === target.subject_name &&
@@ -392,6 +403,39 @@ export default function ArchivePage() {
     }
   };
 
+  // ─── 폴더 이름 수정 ──────────────────────────────────────────────────────────
+  const handleFolderNameSave = async (folder: FolderGroup) => {
+    const newName = editSubjectName.trim();
+    if (!newName || !user) { setEditingFolderKey(null); return; }
+    if (newName === folder.subject_name) { setEditingFolderKey(null); return; }
+    setEditSaving(true);
+    try {
+      const res = await updateArchiveFolderName(user.id, folder.subject_name, folder.grade_level, folder.semester, newName);
+      if (res.error) {
+        console.error("[Archive] 폴더 이름 수정 실패:", res.error);
+        showToast(`수정 실패: ${res.error.message}`, "error");
+      } else if (!res.data || (Array.isArray(res.data) && res.data.length === 0)) {
+        showToast("수정 권한이 없거나 해당 폴더를 찾을 수 없습니다.", "error");
+      } else {
+        if (
+          selectedFolder?.subject_name === folder.subject_name &&
+          selectedFolder?.grade_level  === folder.grade_level &&
+          selectedFolder?.semester     === folder.semester
+        ) {
+          setSelectedFolder({ ...selectedFolder, subject_name: newName });
+        }
+        setEditingFolderKey(null);
+        await fetchArchive();
+        showToast("폴더 이름이 수정되었습니다.", "success");
+      }
+    } catch (err) {
+      console.error("[Archive] handleFolderNameSave 예외:", err);
+      showToast("수정 중 오류가 발생했습니다.", "error");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmItem || !user) return;
     const item = deleteConfirmItem;
@@ -400,12 +444,25 @@ export default function ArchivePage() {
     try {
       if (item.file_url) {
         const storRes = await deleteArchiveFile(ARCHIVE_BUCKET, item.file_url);
-        if (storRes.error) { showToast("파일 삭제에 실패했습니다.", "error"); return; }
+        if (storRes.error) {
+          console.error("[Archive] Storage 파일 삭제 실패:", storRes.error);
+          showToast("파일 삭제에 실패했습니다.", "error");
+          return;
+        }
       }
       const dbRes = await deleteArchiveMeta(item.id);
-      if (dbRes.error) { showToast("파일 삭제에 실패했습니다.", "error"); }
-      else { await fetchArchive(); showToast("파일이 삭제되었습니다.", "success"); }
-    } catch {
+      if (dbRes.error) {
+        console.error("[Archive] DB 레코드 삭제 실패:", dbRes.error);
+        showToast(`삭제 실패: ${dbRes.error.message}`, "error");
+      } else if (!dbRes.data || (Array.isArray(dbRes.data) && dbRes.data.length === 0)) {
+        console.warn("[Archive] DB 삭제: 영향받은 행 없음 (RLS 차단 또는 이미 삭제됨)");
+        showToast("삭제 권한이 없거나 이미 삭제된 파일입니다.", "error");
+      } else {
+        await fetchArchive();
+        showToast("파일이 삭제되었습니다.", "success");
+      }
+    } catch (err) {
+      console.error("[Archive] handleDeleteConfirm 예외:", err);
       showToast("파일 삭제 중 오류가 발생했습니다.", "error");
     } finally {
       setSaving(false);
@@ -527,37 +584,28 @@ export default function ArchivePage() {
               </div>
             ) : (
               folders.map((folder) => {
+                const folderKey = `${folder.subject_name}|${folder.grade_level}|${folder.semester}`;
                 const isSelected =
                   selectedFolder?.subject_name === folder.subject_name &&
                   selectedFolder?.grade_level  === folder.grade_level  &&
                   selectedFolder?.semester     === folder.semester;
+                const isEditing = editingFolderKey === folderKey;
+                const isOwn = folder.user_id === user?.id;
                 return (
                   <div
-                    key={`${folder.subject_name}|${folder.grade_level}|${folder.semester}`}
+                    key={folderKey}
                     role="button"
                     tabIndex={0}
-                    onClick={() => setSelectedFolder(folder)}
-                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSelectedFolder(folder); }}
+                    onClick={() => { if (!isEditing) setSelectedFolder(folder); }}
+                    onKeyDown={(e) => { if (!isEditing && (e.key === "Enter" || e.key === " ")) setSelectedFolder(folder); }}
                     onContextMenu={(e) => { e.preventDefault(); setContextMenu({ folder, x: e.clientX, y: e.clientY }); }}
-                    className={`group relative flex h-36 w-full cursor-pointer flex-col justify-between rounded-2xl border p-4 text-left transition ${
+                    className={`relative flex min-h-36 w-full cursor-pointer flex-col justify-between rounded-2xl border p-4 text-left transition ${
                       isSelected
                         ? "border-sky-400 bg-sky-50 dark:border-sky-600 dark:bg-sky-950/20"
                         : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600"
                     }`}>
-                    {/* 삭제 버튼 (hover 시 표시) */}
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); setDeleteFolderTarget(folder); }}
-                      className="absolute right-2 top-2 rounded-full p-1.5 text-slate-300 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:text-slate-600 dark:hover:bg-rose-950/30 dark:hover:text-rose-400"
-                      title="폴더 삭제"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                      </svg>
-                    </button>
-
                     <div>
-                      <div className="flex items-center justify-between gap-1 pr-6">
+                      <div className="flex items-center justify-between gap-1">
                         <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                           {folder.grade_level} · {folder.semester}
                         </span>
@@ -569,13 +617,60 @@ export default function ArchivePage() {
                           {folder.fileCount}개
                         </span>
                       </div>
-                      <p className="mt-2 line-clamp-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                        {folder.subject_name}
-                      </p>
+                      {isEditing ? (
+                        <>
+                          <input
+                            value={editSubjectName}
+                            onChange={(e) => setEditSubjectName(e.target.value)}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === "Enter") handleFolderNameSave(folder);
+                              if (e.key === "Escape") setEditingFolderKey(null);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            autoFocus
+                            className="mt-2 w-full rounded-lg border border-sky-300 bg-white px-2 py-1 text-sm font-semibold text-slate-900 outline-none focus:border-sky-500 dark:border-sky-700 dark:bg-slate-800 dark:text-slate-100"
+                          />
+                          <div className="mt-1.5 flex gap-1.5" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              onClick={() => handleFolderNameSave(folder)}
+                              disabled={editSaving}
+                              className="rounded-md bg-sky-600 px-2.5 py-0.5 text-[10px] font-semibold text-white transition hover:bg-sky-700 disabled:opacity-60"
+                            >{editSaving ? "…" : "확인"}</button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingFolderKey(null)}
+                              className="rounded-md border border-slate-200 px-2.5 py-0.5 text-[10px] font-semibold text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >취소</button>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="mt-2 line-clamp-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {folder.subject_name}
+                        </p>
+                      )}
                     </div>
-                    <div className="flex items-center gap-1.5 text-xs text-slate-400 dark:text-slate-500">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                      {folder.fileCount === 0 ? "자료 없음" : `자료 ${folder.fileCount}개`}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-xs text-slate-400 dark:text-slate-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        {folder.fileCount === 0 ? "자료 없음" : `자료 ${folder.fileCount}개`}
+                      </div>
+                      {isOwn && (
+                        <div className="flex items-center gap-1 text-xs" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
+                            className="font-medium text-sky-400 transition hover:text-sky-600 dark:text-sky-500 dark:hover:text-sky-300"
+                          >수정</button>
+                          <span className="text-slate-200 dark:text-slate-600">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteFolderTarget(folder)}
+                            className="font-medium text-rose-400 transition hover:text-rose-600 dark:text-rose-500 dark:hover:text-rose-300"
+                          >삭제</button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

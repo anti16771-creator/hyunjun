@@ -146,9 +146,14 @@ create policy "Users can insert own archive"
   on academic_archive for insert
   with check (auth.uid() = user_id);
 
+create policy "Users can update own archive"
+  on academic_archive for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
 create policy "Users can delete own archive"
   on academic_archive for delete
-  using (auth.uid() = user_id);
+  using (auth.uid() = user_id OR user_id IS NULL);
 
 -- 커뮤니티 게시판 테이블
 create table if not exists community_posts (

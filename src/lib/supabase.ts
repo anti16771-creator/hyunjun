@@ -356,7 +356,25 @@ export async function createArchiveFile(item: {
 
 export async function deleteArchiveMeta(id: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("academic_archive").delete().eq("id", id);
+  return supabase.from("academic_archive").delete().eq("id", id).select();
+}
+
+export async function updateArchiveFolderName(
+  userId: string,
+  oldSubjectName: string,
+  gradeLevel: string,
+  semester: string,
+  newSubjectName: string,
+) {
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  return supabase
+    .from("academic_archive")
+    .update({ subject_name: newSubjectName })
+    .eq("user_id", userId)
+    .eq("subject_name", oldSubjectName)
+    .eq("grade_level", gradeLevel)
+    .eq("semester", semester)
+    .select();
 }
 
 export async function listArchiveFiles(bucket: string) {
