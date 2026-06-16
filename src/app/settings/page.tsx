@@ -192,15 +192,23 @@ export default function SettingsPage() {
     updateLocalProfile({ nickname: nickname.trim(), school: school.trim(), department: department.trim() });
 
     // 아바타 업로드
+    let avatarError = false;
     if (avatarFile && user) {
       const ext  = avatarFile.name.split(".").pop()?.toLowerCase() ?? "jpg";
       const path = `${user.id}/avatar.${ext}`;
       const uploadRes = await uploadAvatar(path, avatarFile);
       if (uploadRes.error) {
+        avatarError = true;
         showToast("사진 업로드에 실패했습니다.", "error");
       } else {
         const publicUrl = `${getAvatarPublicUrl(path)}?t=${Date.now()}`;
-        await updateProfileAvatarUrl(user.id, publicUrl);
+        const updateRes = await updateProfileAvatarUrl(user.id, publicUrl);
+        if (updateRes.error) {
+          console.error("avatar_url 업데이트 실패:", updateRes.error);
+        } else if (!updateRes.data || (Array.isArray(updateRes.data) && updateRes.data.length === 0)) {
+          console.warn("avatar_url 업데이트: 반영된 행 없음 (RLS 정책 또는 ID 불일치)");
+        }
+        // 스토리지 업로드 성공 시 DB 저장 성패와 무관하게 로컬 즉시 반영
         updateLocalProfile({ avatarUrl: publicUrl });
         setAvatarFile(null);
         setAvatarPreview("");
@@ -209,9 +217,11 @@ export default function SettingsPage() {
 
     await new Promise((r) => setTimeout(r, 200));
     setProfileSaving(false);
-    setProfileSaved(true);
-    setTimeout(() => setProfileSaved(false), 2500);
-    showToast("프로필이 저장되었습니다.");
+    if (!avatarError) {
+      setProfileSaved(true);
+      setTimeout(() => setProfileSaved(false), 2500);
+      showToast("프로필이 저장되었습니다.");
+    }
   };
 
   // Focus save

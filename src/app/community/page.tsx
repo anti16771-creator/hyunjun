@@ -287,6 +287,8 @@ export default function CommunityPage() {
       if (res.error) {
         console.error("updateCommunityPost error", res.error);
         showToast(res.error.message || "수정에 실패했습니다.", "error");
+      } else if (!res.data || res.data.length === 0) {
+        showToast("수정 권한이 없거나 게시글을 찾을 수 없습니다.", "error");
       } else {
         handleCloseWrite();
         await loadPosts(searchQuery || undefined);
@@ -417,6 +419,8 @@ export default function CommunityPage() {
     if (res.error) {
       console.error("deleteCommunityPost error", res.error);
       showToast(res.error.message || "삭제에 실패했습니다.", "error");
+    } else if (!res.data || res.data.length === 0) {
+      showToast("삭제 권한이 없거나 이미 삭제된 게시글입니다.", "error");
     } else {
       if (selectedPost?.id === deleteConfirmPost.id) setSelectedPost(null);
       setDeleteConfirmPost(null);

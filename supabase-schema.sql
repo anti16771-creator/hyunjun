@@ -45,8 +45,24 @@ create table if not exists profiles (
   email text not null unique,
   name text,
   role text not null default 'user',
+  avatar_url text,
   created_at timestamptz not null default now()
 );
+
+-- ─── profiles RLS ─────────────────────────────────────────────────────────────
+alter table profiles enable row level security;
+
+create policy "Anyone can read profiles"
+  on profiles for select
+  using (true);
+
+create policy "Users can insert own profile"
+  on profiles for insert
+  with check (auth.uid() = id);
+
+create policy "Users can update own profile"
+  on profiles for update
+  using (auth.uid() = id);
 
 -- 플래너 작업 테이블
 create table if not exists planner_tasks (
@@ -146,6 +162,35 @@ create table if not exists community_posts (
   file_name text,
   created_at timestamptz not null default now()
 );
+
+-- ─── community_posts RLS ──────────────────────────────────────────────────────
+alter table community_posts enable row level security;
+
+create policy "Anyone can read posts"
+  on community_posts for select
+  using (true);
+
+create policy "Users can insert own posts"
+  on community_posts for insert
+  with check (auth.uid() = user_id);
+
+create policy "Users can update own posts or admins"
+  on community_posts for update
+  using (
+    auth.uid() = user_id
+    or exists (
+      select 1 from profiles where id = auth.uid() and role in ('admin', 'staff')
+    )
+  );
+
+create policy "Users can delete own posts or admins"
+  on community_posts for delete
+  using (
+    auth.uid() = user_id
+    or exists (
+      select 1 from profiles where id = auth.uid() and role in ('admin', 'staff')
+    )
+  );
 
 -- Supabase Storage bucket recommendation:
 -- 1. Create a bucket named "archives" in Supabase Storage.

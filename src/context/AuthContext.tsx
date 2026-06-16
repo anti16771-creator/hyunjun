@@ -77,9 +77,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const profileResult = await getUserProfile<UserProfile>(userId);
     if (!profileResult.error && profileResult.data) {
       setProfile(profileResult.data);
-      // DB에 avatar_url 있으면 localStorage 캐시에 동기화
-      const url = profileResult.data.avatar_url ?? "";
-      if (url) {
+      // DB에 avatar_url 있으면 localStorage 캐시에 동기화 (타임스탬프로 캐시 무효화)
+      const raw = profileResult.data.avatar_url ?? "";
+      if (raw) {
+        const url = raw.includes("?t=")
+          ? raw.replace(/\?t=\d+/, `?t=${Date.now()}`)
+          : `${raw}${raw.includes("?") ? "&" : "?"}t=${Date.now()}`;
         lsWrite(LS_AVATAR_URL, url);
         setLocalProfile((prev) => ({ ...prev, avatarUrl: url }));
       }

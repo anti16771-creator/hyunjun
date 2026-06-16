@@ -396,12 +396,12 @@ export async function updateCommunityPost(
   item: { title: string; content: string; file_url?: string | null; file_name?: string | null },
 ) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("community_posts").update(item).eq("id", id);
+  return supabase.from("community_posts").update(item).eq("id", id).select();
 }
 
 export async function deleteCommunityPost(id: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("community_posts").delete().eq("id", id);
+  return supabase.from("community_posts").delete().eq("id", id).select();
 }
 
 export async function createCommunityPost(item: {
@@ -583,5 +583,7 @@ export function getAvatarPublicUrl(path: string): string {
 }
 
 export async function updateProfileAvatarUrl(userId: string, avatarUrl: string) {
-  return runProfileQuery((table) => supabase!.from(table).update({ avatar_url: avatarUrl }).eq("id", userId));
+  return runProfileQuery((table) =>
+    supabase!.from(table).update({ avatar_url: avatarUrl }).eq("id", userId).select(),
+  );
 }
