@@ -43,7 +43,25 @@ type ExamEntry = {
   created_at?: string;
 };
 
-type StudyPlan = { date: string; task: string; duration: number };
+type StudyPlan = { date: string; subject: string; task: string; duration: number };
+
+// ─── Plan card 색상 ───────────────────────────────────────────────────────────
+const PLAN_COLORS = [
+  { dot: "bg-rose-500",    text: "text-rose-700 dark:text-rose-400"    },
+  { dot: "bg-sky-500",     text: "text-sky-700 dark:text-sky-400"      },
+  { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400" },
+  { dot: "bg-amber-500",   text: "text-amber-700 dark:text-amber-400"  },
+  { dot: "bg-violet-500",  text: "text-violet-700 dark:text-violet-400" },
+  { dot: "bg-orange-500",  text: "text-orange-700 dark:text-orange-400" },
+  { dot: "bg-teal-500",    text: "text-teal-700 dark:text-teal-400"    },
+  { dot: "bg-pink-500",    text: "text-pink-700 dark:text-pink-400"    },
+] as const;
+
+function getPlanColor(subject: string) {
+  let h = 5381;
+  for (let i = 0; i < subject.length; i++) h = ((h << 5) + h + subject.charCodeAt(i)) | 0;
+  return PLAN_COLORS[Math.abs(h) % PLAN_COLORS.length];
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function scoreToGradePoint(score?: number | null) {
@@ -607,6 +625,10 @@ export default function GradesPage() {
             myScore: item.my_score,
             averageScore: item.average_score,
             grade: scoreToGradeLetter(item.my_score),
+            studyRange: item.study_range,
+            credits: item.credits,
+            isMajor: item.is_major,
+            priorityScore: calcPriorityScore(item, entryMeta[item.id]?.finalWeightPct ?? 50),
           })),
         }),
       });
@@ -626,12 +648,10 @@ export default function GradesPage() {
     setPlanSaving(true);
     let count = 0;
     for (const plan of planResult) {
-      const colonIdx = plan.task.indexOf(":");
-      const subjectName = colonIdx > 0 ? plan.task.slice(0, colonIdx).trim() : plan.task;
       const res = await createStudyCalendarEvent({
         user_id: user.id,
-        subject_name: subjectName,
-        task: plan.task,
+        subject_name: plan.subject || plan.task,
+        task: plan.subject ? `${plan.subject}: ${plan.task}` : plan.task,
         study_date: plan.date,
         duration: plan.duration,
       });
@@ -641,10 +661,6 @@ export default function GradesPage() {
     setPlanResult(null);
     showToast(`${count}개의 학습 일정을 타이머에 추가했습니다.`, "success");
     setPlanSaving(false);
-  };
-
-  const updatePlanRow = (index: number, field: keyof StudyPlan, value: string | number) => {
-    setPlanResult((prev) => prev?.map((p, i) => i === index ? { ...p, [field]: value } : p) ?? null);
   };
 
   // ─── Guards ────────────────────────────────────────────────────────────────
@@ -1492,49 +1508,67 @@ export default function GradesPage() {
                   <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">AI가 학습 계획을 생성하고 있어요...</p>
                 </div>
               ) : planResult ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-700">
-                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">날짜</th>
-                        <th className="pb-3 pr-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">할 일</th>
-                        <th className="pb-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">시간(분)</th>
-                        <th className="pb-3" />
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {planResult.map((plan, i) => (
-                        <tr key={i}>
-                          <td className="py-2 pr-3">
-                            <input type="date" value={plan.date}
-                              onChange={(e) => updatePlanRow(i, "date", e.target.value)}
-                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
-                          </td>
-                          <td className="py-2 pr-3">
-                            <input value={plan.task}
-                              onChange={(e) => updatePlanRow(i, "task", e.target.value)}
-                              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
-                          </td>
-                          <td className="py-2 pr-2">
-                            <input type="number" min={5} max={480} value={plan.duration}
-                              onChange={(e) => updatePlanRow(i, "duration", parseInt(e.target.value, 10) || 0)}
-                              className="w-20 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
-                          </td>
-                          <td className="py-2 text-right">
-                            <button type="button"
-                              onClick={() => setPlanResult((prev) => prev?.filter((_, idx) => idx !== i) ?? null)}
-                              className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/30">
-                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                              </svg>
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {planResult.length === 0 && (
-                    <p className="py-6 text-center text-sm text-slate-400">항목이 없습니다. 다시 생성해보세요.</p>
+                <div>
+                  {planResult.length === 0 ? (
+                    <p className="py-8 text-center text-sm text-slate-400 dark:text-slate-500">항목이 없습니다. 다시 생성해보세요.</p>
+                  ) : (
+                    (() => {
+                      const DOW = ["일","월","화","수","목","금","토"];
+                      const todayStr = new Date().toISOString().slice(0, 10);
+                      // 날짜별로 인덱스 그룹핑
+                      const groups: Record<string, number[]> = {};
+                      planResult.forEach((p, idx) => {
+                        if (!groups[p.date]) groups[p.date] = [];
+                        groups[p.date].push(idx);
+                      });
+                      return Object.entries(groups)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([date, indices]) => {
+                          const dow      = new Date(date + "T00:00:00").getDay();
+                          const totalMin = indices.reduce((s, i) => s + planResult[i].duration, 0);
+                          const isToday  = date === todayStr;
+                          return (
+                            <div key={date} className="mb-5 last:mb-0">
+                              {/* 날짜 헤더 */}
+                              <div className="mb-2 flex items-center gap-2 border-b border-slate-100 pb-2 dark:border-slate-800">
+                                <span className={`rounded-lg px-2.5 py-1 text-[11px] font-bold ${isToday ? "bg-violet-600 text-white" : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}>
+                                  {date} ({DOW[dow]})
+                                </span>
+                                <span className="text-[11px] text-slate-400 dark:text-slate-500">총 {totalMin}분</span>
+                              </div>
+                              {/* 항목들 */}
+                              <div className="space-y-1.5">
+                                {indices.map((globalIdx) => {
+                                  const plan  = planResult[globalIdx];
+                                  const color = getPlanColor(plan.subject || plan.task);
+                                  return (
+                                    <div key={globalIdx} className="group flex items-start gap-3 rounded-2xl border border-slate-100 bg-slate-50/60 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/40">
+                                      <span className={`mt-[5px] h-2 w-2 shrink-0 rounded-full ${color.dot}`} />
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex flex-wrap items-baseline gap-2">
+                                          <span className={`text-[11px] font-bold ${color.text}`}>{plan.subject || "—"}</span>
+                                          <span className="text-[11px] text-slate-400 dark:text-slate-500">· {plan.duration}분</span>
+                                        </div>
+                                        <p className="mt-0.5 text-xs leading-relaxed text-slate-700 dark:text-slate-300">{plan.task}</p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => setPlanResult((prev) => prev?.filter((_, i) => i !== globalIdx) ?? null)}
+                                        className="mt-0.5 shrink-0 rounded-full p-1 text-slate-300 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:text-slate-600 dark:hover:bg-rose-950/30 dark:hover:text-rose-400"
+                                        title="삭제"
+                                      >
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                                        </svg>
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        });
+                    })()
                   )}
                 </div>
               ) : (

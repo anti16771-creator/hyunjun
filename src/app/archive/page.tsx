@@ -149,8 +149,12 @@ export default function ArchivePage() {
   // Selected folder
   const [selectedFolder, setSelectedFolder]   = useState<FolderGroup | null>(null);
 
-  // Delete confirm modal
+  // 파일 삭제 confirm
   const [deleteConfirmItem, setDeleteConfirmItem] = useState<ArchiveItem | null>(null);
+
+  // 폴더 삭제 confirm + 우클릭 컨텍스트 메뉴
+  const [deleteFolderTarget, setDeleteFolderTarget] = useState<FolderGroup | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ folder: FolderGroup; x: number; y: number } | null>(null);
 
   // Toast
   const [toastMessage, setToastMessage]       = useState<string | null>(null);
@@ -355,6 +359,39 @@ export default function ArchivePage() {
     }
   };
 
+  // ─── 폴더 삭제 ───────────────────────────────────────────────────────────────
+  const handleFolderDelete = async () => {
+    if (!deleteFolderTarget || !user) return;
+    const target = deleteFolderTarget;
+    setDeleteFolderTarget(null);
+    setSaving(true);
+    try {
+      const folderItems = allItems.filter(
+        (i) => i.subject_name === target.subject_name &&
+                i.grade_level  === target.grade_level  &&
+                i.semester     === target.semester,
+      );
+      // 1. Storage 파일 삭제
+      await Promise.all(
+        folderItems.filter((i) => i.file_url).map((i) => deleteArchiveFile(ARCHIVE_BUCKET, i.file_url!)),
+      );
+      // 2. DB 레코드 전체 삭제
+      await Promise.all(folderItems.map((i) => deleteArchiveMeta(i.id)));
+      // 3. 선택된 폴더이면 해제
+      if (
+        selectedFolder?.subject_name === target.subject_name &&
+        selectedFolder?.grade_level  === target.grade_level  &&
+        selectedFolder?.semester     === target.semester
+      ) setSelectedFolder(null);
+      await fetchArchive();
+      showToast("폴더가 삭제되었습니다.", "success");
+    } catch {
+      showToast("폴더 삭제 중 오류가 발생했습니다.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmItem || !user) return;
     const item = deleteConfirmItem;
@@ -495,17 +532,32 @@ export default function ArchivePage() {
                   selectedFolder?.grade_level  === folder.grade_level  &&
                   selectedFolder?.semester     === folder.semester;
                 return (
-                  <button
+                  <div
                     key={`${folder.subject_name}|${folder.grade_level}|${folder.semester}`}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelectedFolder(folder)}
-                    className={`group flex h-36 w-full flex-col justify-between rounded-2xl border p-4 text-left transition ${
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSelectedFolder(folder); }}
+                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ folder, x: e.clientX, y: e.clientY }); }}
+                    className={`group relative flex h-36 w-full cursor-pointer flex-col justify-between rounded-2xl border p-4 text-left transition ${
                       isSelected
                         ? "border-sky-400 bg-sky-50 dark:border-sky-600 dark:bg-sky-950/20"
                         : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600"
                     }`}>
+                    {/* 삭제 버튼 (hover 시 표시) */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setDeleteFolderTarget(folder); }}
+                      className="absolute right-2 top-2 rounded-full p-1.5 text-slate-300 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:text-slate-600 dark:hover:bg-rose-950/30 dark:hover:text-rose-400"
+                      title="폴더 삭제"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                      </svg>
+                    </button>
+
                     <div>
-                      <div className="flex items-center justify-between gap-1">
+                      <div className="flex items-center justify-between gap-1 pr-6">
                         <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                           {folder.grade_level} · {folder.semester}
                         </span>
@@ -525,7 +577,7 @@ export default function ArchivePage() {
                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                       {folder.fileCount === 0 ? "자료 없음" : `자료 ${folder.fileCount}개`}
                     </div>
-                  </button>
+                  </div>
                 );
               })
             )}
@@ -712,6 +764,65 @@ export default function ArchivePage() {
             )}
           </div>
         </section>
+      )}
+
+      {/* ── 우클릭 컨텍스트 메뉴 ────────────────────────────── */}
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+        >
+          <div
+            className="fixed z-50 min-w-[120px] overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl dark:border-slate-700 dark:bg-slate-900"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => { setDeleteFolderTarget(contextMenu.folder); setContextMenu(null); }}
+              className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-rose-600 transition hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+              삭제
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── 폴더 삭제 확인 모달 ───────────────────────────── */}
+      {deleteFolderTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-2xl dark:bg-slate-900">
+            <div className="flex flex-col items-center gap-4 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-50 dark:bg-rose-950/40">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-rose-600 dark:text-rose-400">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">폴더를 삭제할까요?</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{deleteFolderTarget.subject_name}</p>
+                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                  폴더 안의 파일도 모두 삭제됩니다.<br />
+                  삭제 후에는 복구할 수 없습니다.
+                </p>
+              </div>
+              <div className="flex w-full gap-3">
+                <button type="button" onClick={() => setDeleteFolderTarget(null)}
+                  className="flex-1 rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                  취소
+                </button>
+                <button type="button" onClick={handleFolderDelete} disabled={saving}
+                  className="flex-1 rounded-3xl bg-rose-600 py-3 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:opacity-50">
+                  {saving ? "삭제 중..." : "삭제"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── 파일 삭제 확인 모달 ───────────────────────────── */}

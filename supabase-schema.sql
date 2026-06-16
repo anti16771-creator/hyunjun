@@ -119,6 +119,21 @@ create table if not exists academic_archive (
   created_at timestamptz not null default now()
 );
 
+-- ─── academic_archive RLS ───────────────────────────────────────────────────
+alter table academic_archive enable row level security;
+
+create policy "Users can select own archive"
+  on academic_archive for select
+  using (auth.uid() = user_id);
+
+create policy "Users can insert own archive"
+  on academic_archive for insert
+  with check (auth.uid() = user_id);
+
+create policy "Users can delete own archive"
+  on academic_archive for delete
+  using (auth.uid() = user_id);
+
 -- 커뮤니티 게시판 테이블
 create table if not exists community_posts (
   id uuid primary key default gen_random_uuid(),

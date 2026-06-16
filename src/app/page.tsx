@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LoadingCard from "@/src/components/LoadingCard";
 import MetricCard from "@/src/components/MetricCard";
 import ToastMessage from "@/src/components/ToastMessage";
@@ -151,8 +151,19 @@ export default function Home() {
   const [inlineSubject, setInlineSubject] = useState("");
   const inlineRef = useRef<HTMLInputElement>(null);
 
-  // 삭제 확인
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // 드래그 멀티 선택
+  const [isDragging, setIsDragging]           = useState(false);
+  const [dragStart, setDragStart]             = useState<{ weekday: number; period: number } | null>(null);
+  const [dragCurrent, setDragCurrent]         = useState<{ weekday: number; period: number } | null>(null);
+  const [multiSelectModal, setMultiSelectModal] = useState<{ weekday: number; periods: number[] } | null>(null);
+  const [multiSubject, setMultiSubject]         = useState("");
+  const multiSubjectRef = useRef<HTMLInputElement>(null);
+
+  // 블록 삭제 다이얼로그
+  const [blockDeleteDialog, setBlockDeleteDialog] = useState<{
+    entries: { id: string; period: number }[];
+    subjectName: string;
+  } | null>(null);
 
   // 동기화
   const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
@@ -236,6 +247,37 @@ export default function Home() {
     () => schedule.filter((i) => i.weekday === todayWeekday).length,
     [schedule, todayWeekday],
   );
+
+  // 연속 교시 같은 과목 → 하나의 블록으로 합치기
+  const mergedBlocks = useMemo(() => {
+    const result: Record<number, { subject: string; startPeriod: number; endPeriod: number; ids: string[] }[]> = {};
+    weekdayOrder.forEach((wd) => {
+      const dayItems = schedule
+        .filter((s) => s.weekday === wd)
+        .map((s) => ({ ...s, p: Number(s.period.replace(/[^0-9]/g, "")) }))
+        .sort((a, b) => a.p - b.p);
+      const blocks: { subject: string; startPeriod: number; endPeriod: number; ids: string[] }[] = [];
+      let i = 0;
+      while (i < dayItems.length) {
+        const cur = dayItems[i];
+        let end = cur.p;
+        const ids = [cur.id];
+        while (
+          i + 1 < dayItems.length &&
+          dayItems[i + 1].subject === cur.subject &&
+          dayItems[i + 1].p === end + 1
+        ) {
+          i++;
+          end = dayItems[i].p;
+          ids.push(dayItems[i].id);
+        }
+        blocks.push({ subject: cur.subject, startPeriod: cur.p, endPeriod: end, ids });
+        i++;
+      }
+      result[wd] = blocks;
+    });
+    return result;
+  }, [schedule, weekdayOrder]);
 
   // ─── 잔디 그래프 ─────────────────────────────────────────────────────────
   const [grassTooltip, setGrassTooltip] = useState<{ date: string; minutes: number; x: number; y: number } | null>(null);
@@ -404,21 +446,81 @@ export default function Home() {
     finally { setSaving(false); }
   }, [user, fetchData, showToast]);
 
-  // ─── 삭제 ─────────────────────────────────────────────────────────────────
-  const handleDeleteConfirm = async () => {
-    if (!deleteConfirmId) return;
-    const id = deleteConfirmId;
-    setDeleteConfirmId(null);
+  // ─── 멀티 교시 저장 ────────────────────────────────────────────────────────
+  const handleMultiSave = useCallback(async () => {
+    if (!multiSelectModal || !multiSubject.trim() || !user) return;
+    setSaving(true);
+    try {
+      await Promise.all(
+        multiSelectModal.periods.map((p) =>
+          createTimetableEntry({ user_id: user.id, subject: multiSubject.trim(), weekday: String(multiSelectModal.weekday), period: `${p}교시` })
+        )
+      );
+      setMultiSelectModal(null);
+      setMultiSubject("");
+      await fetchData();
+      showToast(`${multiSelectModal.periods.length}개 교시가 추가되었습니다.`, "success");
+    } catch { showToast("저장 중 오류가 발생했습니다.", "error"); }
+    finally { setSaving(false); }
+  }, [multiSelectModal, multiSubject, user, fetchData, showToast]);
+
+  // ─── 블록 삭제 ────────────────────────────────────────────────────────────
+  const handleBlockDeleteAll = useCallback(async () => {
+    if (!blockDeleteDialog) return;
+    const { entries } = blockDeleteDialog;
+    setBlockDeleteDialog(null);
+    try {
+      await Promise.all(entries.map((e) => deleteTimetableEntry(e.id)));
+      await fetchData();
+      showToast(`${entries.length}개 교시가 삭제되었습니다.`, "success");
+    } catch { showToast("삭제 중 오류가 발생했습니다.", "error"); }
+  }, [blockDeleteDialog, fetchData, showToast]);
+
+  const handleBlockDeleteSingle = useCallback(async (id: string) => {
+    setBlockDeleteDialog(null);
     try {
       const result = await deleteTimetableEntry(id);
       if (result.error) showToast("삭제에 실패했습니다.", "error");
       else { await fetchData(); showToast("수업이 삭제되었습니다.", "success"); }
     } catch { showToast("삭제 중 오류가 발생했습니다.", "error"); }
-  };
+  }, [fetchData, showToast]);
 
   useEffect(() => {
     if (inlineCell && inlineRef.current) inlineRef.current.focus();
   }, [inlineCell]);
+
+  // 드래그 상태를 ref로도 유지 (document mouseup 핸들러 stale closure 방지)
+  const dragRef = useRef({ isDragging: false, dragStart: null as typeof dragStart, dragCurrent: null as typeof dragCurrent, schedule: [] as typeof schedule });
+  dragRef.current = { isDragging, dragStart, dragCurrent, schedule };
+
+  useEffect(() => {
+    const endDrag = () => {
+      const { isDragging: active, dragStart: start, dragCurrent: cur, schedule: sched } = dragRef.current;
+      if (!active) return;
+      if (start && cur && start.weekday === cur.weekday) {
+        const wd   = start.weekday;
+        const minP = Math.min(start.period, cur.period);
+        const maxP = Math.max(start.period, cur.period);
+        if (minP === maxP) {
+          setInlineCell({ weekday: wd, period: minP });
+          setInlineSubject("");
+          setWeekday(wd);
+          setPeriod(`${minP}교시`);
+        } else {
+          const allP   = Array.from({ length: maxP - minP + 1 }, (_, j) => minP + j);
+          const emptyP = allP.filter((p) => !sched.some((s) => s.weekday === wd && Number(s.period.replace(/[^0-9]/g, "")) === p));
+          if (emptyP.length > 0) { setMultiSelectModal({ weekday: wd, periods: emptyP }); setMultiSubject(""); }
+        }
+      }
+      setIsDragging(false); setDragStart(null); setDragCurrent(null);
+    };
+    document.addEventListener("mouseup", endDrag);
+    return () => document.removeEventListener("mouseup", endDrag);
+  }, []);
+
+  useEffect(() => {
+    if (multiSelectModal && multiSubjectRef.current) multiSubjectRef.current.focus();
+  }, [multiSelectModal]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -474,7 +576,7 @@ export default function Home() {
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">주간 시간표</p>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">빈 셀을 클릭하면 인라인으로 수업을 추가할 수 있어요.</p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">빈 셀을 클릭하거나 드래그해서 여러 교시를 한 번에 등록할 수 있어요.</p>
             </div>
             <div className="flex items-center gap-2">
               {lastSyncAt && (
@@ -528,7 +630,7 @@ export default function Home() {
                   <div className="min-w-[700px]">
 
                     {/* ── 헤더 행 ── */}
-                    <div className="grid grid-cols-8 overflow-hidden rounded-[1rem] border border-slate-200 dark:border-slate-700">
+                    <div className="overflow-hidden rounded-[1rem] border border-slate-200 dark:border-slate-700" style={{ display: "grid", gridTemplateColumns: "72px repeat(7, 1fr)" }}>
                       {/* 교시 헤더 */}
                       <div className="bg-slate-100 px-3 py-3 text-center dark:bg-slate-800">
                         <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">교시</p>
@@ -560,44 +662,97 @@ export default function Home() {
                       ))}
                     </div>
 
-                    {/* ── 시간표 바디 ── */}
-                    <div className="mt-1 space-y-[2px]">
+                    {/* ── 시간표 바디 (CSS Grid — 블록 병합 지원) ── */}
+                    <div
+                      className="mt-[2px]"
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "72px repeat(7, 1fr)",
+                        gridTemplateRows: "repeat(10, 74px)",
+                        gap: "2px",
+                        userSelect: isDragging ? "none" : undefined,
+                      }}
+                    >
+                      {/* 교시 레이블 열 (column 1) */}
                       {Array.from({ length: 10 }, (_, i) => {
-                        const pi      = i + 1;         // period index (1~10)
-                        const timeStr = `${8 + pi}:00`; // 9:00~18:00
+                        const pi = i + 1;
                         return (
-                          <div key={`row-${pi}`} className="grid grid-cols-8">
-                            {/* 교시 레이블 */}
-                            <div className="flex flex-col justify-center rounded-l-[0.75rem] bg-slate-50 px-3 py-2 dark:bg-slate-900">
-                              <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{pi}교시</span>
-                              <span className="mt-0.5 text-[10px] font-medium text-slate-400 dark:text-slate-500">{timeStr}</span>
-                            </div>
+                          <div key={`label-${pi}`}
+                            style={{ gridColumn: 1, gridRow: pi }}
+                            className="flex flex-col justify-center rounded-l-[0.75rem] bg-slate-50 px-3 py-2 dark:bg-slate-900"
+                          >
+                            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{pi}교시</span>
+                            <span className="mt-0.5 text-[10px] font-medium text-slate-400 dark:text-slate-500">{8 + pi}:00</span>
+                          </div>
+                        );
+                      })}
 
-                            {/* 요일 셀 */}
-                            {weekdayOrder.map((wd) => {
-                              const cellItems = schedule.filter(
-                                (item) => item.weekday === wd && Number(item.period.replace(/[^0-9]/g, "")) === pi,
-                              );
-                              const isToday  = wd === todayWeekday;
-                              const isInline = inlineCell?.weekday === wd && inlineCell?.period === pi;
-                              const isLastCol = wd === 0;
+                      {/* 요일 컬럼 (columns 2~8) */}
+                      {weekdayOrder.map((wd, wdIdx) => {
+                        const colIdx    = wdIdx + 2;
+                        const isToday   = wd === todayWeekday;
+                        const isLastCol = wdIdx === weekdayOrder.length - 1;
+                        const dayBlocks = mergedBlocks[wd] ?? [];
+                        const coveredPeriods = new Set(
+                          dayBlocks.flatMap((b) =>
+                            Array.from({ length: b.endPeriod - b.startPeriod + 1 }, (_, j) => b.startPeriod + j)
+                          )
+                        );
 
+                        return (
+                          <Fragment key={wd}>
+                            {/* 병합 블록 */}
+                            {dayBlocks.map((block) => {
+                              const span  = block.endPeriod - block.startPeriod + 1;
+                              const color = getSubjectColor(block.subject);
+                              const startT = `${8 + block.startPeriod}:00`;
+                              const endT   = `${8 + block.endPeriod + 1}:00`;
                               return (
-                                <div key={`${wd}-${pi}`}
-                                  className={`min-h-[72px] p-1 ${isLastCol ? "rounded-r-[0.75rem]" : ""} ${
-                                    isToday ? "bg-sky-50/60 dark:bg-sky-950/20" : "bg-white dark:bg-slate-950"
-                                  }`}>
+                                <div key={block.ids[0]}
+                                  style={{ gridColumn: colIdx, gridRow: `${block.startPeriod} / span ${span}` }}
+                                  className={`p-1 ${isLastCol ? "rounded-r-[0.75rem]" : ""} ${isToday ? "bg-sky-50/60 dark:bg-sky-950/20" : "bg-white dark:bg-slate-950"}`}
+                                >
+                                  <div className={`group flex h-full flex-col justify-between rounded-lg p-2 pl-3 ${color.cellBg} ${color.borderLeft}`}>
+                                    <div className="flex items-start justify-between gap-1">
+                                      <p className={`flex-1 break-words text-xs font-bold leading-snug ${color.cellText}`}>{block.subject}</p>
+                                      <button type="button"
+                                        onClick={() => setBlockDeleteDialog({ entries: block.ids.map((id, k) => ({ id, period: block.startPeriod + k })), subjectName: block.subject })}
+                                        className="shrink-0 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10"
+                                        title="삭제">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-rose-500 dark:text-rose-400">
+                                          <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                                        </svg>
+                                      </button>
+                                    </div>
+                                    <p className={`text-[10px] font-medium ${color.subText}`}>
+                                      {span > 1 ? `${startT} ~ ${endT}` : startT}
+                                    </p>
+                                  </div>
+                                </div>
+                              );
+                            })}
 
-                                  {cellItems.length === 0 ? (
-                                    isInline ? (
-                                      /* 인라인 입력 모드 */
-                                      <div className="flex h-full min-h-[68px] items-start p-1 pt-1.5">
+                            {/* 빈 셀 (드래그 가능) */}
+                            {Array.from({ length: 10 }, (_, i) => i + 1)
+                              .filter((p) => !coveredPeriods.has(p))
+                              .map((p) => {
+                                const isInline = inlineCell?.weekday === wd && inlineCell?.period === p;
+                                const dMin = isDragging && dragStart?.weekday === wd && dragCurrent ? Math.min(dragStart.period, dragCurrent.period) : -1;
+                                const dMax = isDragging && dragStart?.weekday === wd && dragCurrent ? Math.max(dragStart.period, dragCurrent.period) : -1;
+                                const highlighted = p >= dMin && p <= dMax;
+                                return (
+                                  <div key={`${wd}-${p}`}
+                                    style={{ gridColumn: colIdx, gridRow: p }}
+                                    className={`p-1 ${isLastCol ? "rounded-r-[0.75rem]" : ""} ${isToday ? "bg-sky-50/60 dark:bg-sky-950/20" : "bg-white dark:bg-slate-950"}`}
+                                  >
+                                    {isInline ? (
+                                      <div className="flex h-full items-start p-1 pt-1.5">
                                         <input
                                           ref={inlineRef}
                                           value={inlineSubject}
                                           onChange={(e) => setInlineSubject(e.target.value)}
                                           onKeyDown={(e) => {
-                                            if (e.key === "Enter") handleInlineSave(wd, pi, inlineSubject);
+                                            if (e.key === "Enter") handleInlineSave(wd, p, inlineSubject);
                                             if (e.key === "Escape") { setInlineCell(null); setInlineSubject(""); }
                                           }}
                                           onBlur={() => window.setTimeout(() => { setInlineCell(null); setInlineSubject(""); }, 150)}
@@ -607,59 +762,39 @@ export default function Home() {
                                         />
                                       </div>
                                     ) : (
-                                      /* 빈 셀 — hover 시 파선 테두리 + "+" */
                                       <div
-                                        onClick={() => {
-                                          // 폼 자동 채우기
-                                          setWeekday(wd);
-                                          setPeriod(`${pi}교시`);
-                                          // 인라인 모드도 동시 활성화
-                                          setInlineCell({ weekday: wd, period: pi });
-                                          setInlineSubject("");
+                                        onMouseDown={(e) => {
+                                          e.preventDefault();
+                                          setDragStart({ weekday: wd, period: p });
+                                          setDragCurrent({ weekday: wd, period: p });
+                                          setIsDragging(true);
                                         }}
-                                        className="group flex h-full min-h-[68px] cursor-pointer items-center justify-center rounded-lg transition-colors hover:outline-dashed hover:outline-2 hover:outline-sky-300 hover:bg-sky-50/40 dark:hover:outline-sky-700 dark:hover:bg-sky-950/20"
+                                        onMouseEnter={() => {
+                                          if (isDragging && dragStart?.weekday === wd) setDragCurrent({ weekday: wd, period: p });
+                                        }}
+                                        className={`group flex h-full cursor-pointer items-center justify-center rounded-lg transition-colors ${
+                                          highlighted
+                                            ? "bg-sky-100/80 outline-dashed outline-2 outline-sky-400 dark:bg-sky-900/40 dark:outline-sky-600"
+                                            : "hover:bg-sky-50/40 hover:outline-dashed hover:outline-2 hover:outline-sky-300 dark:hover:bg-sky-950/20 dark:hover:outline-sky-700"
+                                        }`}
                                       >
-                                        <div className="hidden flex-col items-center gap-0.5 group-hover:flex">
-                                          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-sky-400">
-                                            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                                          </svg>
-                                          <span className="text-[9px] font-semibold text-sky-400">수업 추가</span>
-                                        </div>
-                                      </div>
-                                    )
-                                  ) : (
-                                    /* 수업 있는 셀 */
-                                    <div className="space-y-1">
-                                      {cellItems.map((item) => {
-                                        const color = getSubjectColor(item.subject);
-                                        return (
-                                          <div key={item.id}
-                                            className={`group flex min-h-[66px] flex-col justify-between rounded-lg p-2 pl-3 ${color.cellBg} ${color.borderLeft}`}>
-                                            <div className="flex items-start justify-between gap-1">
-                                              <p className={`flex-1 break-words text-xs font-bold leading-snug ${color.cellText}`}>
-                                                {item.subject}
-                                              </p>
-                                              {/* hover 시에만 나타나는 삭제 버튼 */}
-                                              <button type="button"
-                                                onClick={() => setDeleteConfirmId(item.id)}
-                                                className="shrink-0 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10"
-                                                title="삭제">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-rose-500 dark:text-rose-400">
-                                                  <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                                                </svg>
-                                              </button>
-                                            </div>
-                                            {/* 수업 시간 */}
-                                            <p className={`text-[10px] font-medium ${color.subText}`}>{timeStr}</p>
+                                        {highlighted ? (
+                                          <div className="h-2 w-2 rounded-full bg-sky-400 dark:bg-sky-500" />
+                                        ) : (
+                                          <div className="hidden flex-col items-center gap-0.5 group-hover:flex">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-sky-400">
+                                              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                                            </svg>
+                                            <span className="text-[9px] font-semibold text-sky-400">수업 추가</span>
                                           </div>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })
+                            }
+                          </Fragment>
                         );
                       })}
                     </div>
@@ -901,8 +1036,8 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── 삭제 확인 모달 ──────────────────────────────── */}
-        {deleteConfirmId && (
+        {/* ── 블록 삭제 다이얼로그 ─────────────────────────── */}
+        {blockDeleteDialog && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
             <div className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-2xl dark:bg-slate-900">
               <div className="flex flex-col items-center gap-4 text-center">
@@ -913,16 +1048,89 @@ export default function Home() {
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">수업을 삭제할까요?</h2>
-                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">이 수업이 시간표에서 제거됩니다.</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-300">{blockDeleteDialog.subjectName}</p>
+                  {blockDeleteDialog.entries.length > 1 && (
+                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      {blockDeleteDialog.entries[0].period}교시 ~ {blockDeleteDialog.entries[blockDeleteDialog.entries.length - 1].period}교시
+                    </p>
+                  )}
                 </div>
-                <div className="flex w-full gap-3">
-                  <button type="button" onClick={() => setDeleteConfirmId(null)}
+
+                {blockDeleteDialog.entries.length > 1 ? (
+                  /* 멀티 교시 블록 — 전체/개별 선택 */
+                  <div className="w-full space-y-2">
+                    <button type="button" onClick={handleBlockDeleteAll}
+                      className="w-full rounded-3xl bg-rose-600 py-3 text-sm font-semibold text-white transition hover:bg-rose-700">
+                      전체 교시 삭제 ({blockDeleteDialog.entries.length}개)
+                    </button>
+                    <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">또는 개별 교시 선택</p>
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {blockDeleteDialog.entries.map((e) => (
+                        <button key={e.id} type="button"
+                          onClick={() => handleBlockDeleteSingle(e.id)}
+                          className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-900/40">
+                          {e.period}교시만
+                        </button>
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => setBlockDeleteDialog(null)}
+                      className="w-full rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                      취소
+                    </button>
+                  </div>
+                ) : (
+                  /* 단일 교시 */
+                  <div className="flex w-full gap-3">
+                    <button type="button" onClick={() => setBlockDeleteDialog(null)}
+                      className="flex-1 rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+                      취소
+                    </button>
+                    <button type="button" onClick={() => handleBlockDeleteSingle(blockDeleteDialog.entries[0].id)}
+                      className="flex-1 rounded-3xl bg-rose-600 py-3 text-sm font-semibold text-white transition hover:bg-rose-700">
+                      삭제
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── 멀티 교시 과목 입력 팝업 ────────────────────── */}
+        {multiSelectModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+            <div className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-2xl dark:bg-slate-900">
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">수업 일괄 등록</h2>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                    {weekdays[multiSelectModal.weekday]}요일{" "}
+                    {multiSelectModal.periods[0]}교시 ~ {multiSelectModal.periods[multiSelectModal.periods.length - 1]}교시
+                    ({multiSelectModal.periods.length}개 교시)
+                  </p>
+                </div>
+                <input
+                  ref={multiSubjectRef}
+                  value={multiSubject}
+                  onChange={(e) => setMultiSubject(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && multiSubject.trim()) handleMultiSave();
+                    if (e.key === "Escape") { setMultiSelectModal(null); setMultiSubject(""); }
+                  }}
+                  placeholder="과목명을 입력하세요"
+                  className="rounded-3xl border border-slate-200 bg-slate-50 px-5 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+                <div className="flex gap-3">
+                  <button type="button"
+                    onClick={() => { setMultiSelectModal(null); setMultiSubject(""); }}
                     className="flex-1 rounded-3xl border border-slate-300 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
                     취소
                   </button>
-                  <button type="button" onClick={handleDeleteConfirm}
-                    className="flex-1 rounded-3xl bg-rose-600 py-3 text-sm font-semibold text-white transition hover:bg-rose-700">
-                    삭제
+                  <button type="button"
+                    onClick={handleMultiSave}
+                    disabled={!multiSubject.trim() || saving}
+                    className="flex-1 rounded-3xl bg-sky-600 py-3 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+                    {multiSelectModal.periods.length}개 교시 등록
                   </button>
                 </div>
               </div>
