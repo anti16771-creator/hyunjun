@@ -412,14 +412,29 @@ export async function getCommunityPosts(category: string, search?: string) {
 export async function updateCommunityPost(
   id: string,
   item: { title: string; content: string; file_url?: string | null; file_name?: string | null },
+  userId?: string,
 ) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("community_posts").update(item).eq("id", id).select();
+  const { data: { user } } = await supabase.auth.getUser();
+  console.log("[community] updateCommunityPost - auth.uid:", user?.id, "post id:", id, "userId param:", userId);
+  let query = supabase.from("community_posts").update(item).eq("id", id);
+  if (userId) query = query.eq("user_id", userId);
+  const res = await query.select();
+  if (res.error) console.error("[community] 수정 에러:", res.error);
+  else if (!res.data || res.data.length === 0) console.warn("[community] 수정 결과 0행 - RLS가 차단했거나 해당 게시글 없음. auth.uid:", user?.id);
+  return res;
 }
 
-export async function deleteCommunityPost(id: string) {
+export async function deleteCommunityPost(id: string, userId?: string) {
   if (!supabase) return noClient("Supabase client is not initialized.");
-  return supabase.from("community_posts").delete().eq("id", id).select();
+  const { data: { user } } = await supabase.auth.getUser();
+  console.log("[community] deleteCommunityPost - auth.uid:", user?.id, "post id:", id, "userId param:", userId);
+  let query = supabase.from("community_posts").delete().eq("id", id);
+  if (userId) query = query.eq("user_id", userId);
+  const res = await query.select();
+  if (res.error) console.error("[community] 삭제 에러:", res.error);
+  else if (!res.data || res.data.length === 0) console.warn("[community] 삭제 결과 0행 - RLS가 차단했거나 해당 게시글 없음. auth.uid:", user?.id);
+  return res;
 }
 
 export async function createCommunityPost(item: {
@@ -601,7 +616,27 @@ export function getAvatarPublicUrl(path: string): string {
 }
 
 export async function updateProfileAvatarUrl(userId: string, avatarUrl: string) {
-  return runProfileQuery((table) =>
-    supabase!.from(table).update({ avatar_url: avatarUrl }).eq("id", userId).select(),
-  );
+  if (!supabase) return noClient("Supabase client is not initialized.");
+  // runProfileQuery는 에러가 없으면 0행이어도 바로 반환해서 user_profiles를 건너뜀.
+  // 아바타는 반드시 실제로 저장된 테이블에 업데이트해야 하므로 두 테이블을 순차 시도.
+  for (const table of PROFILE_TABLES) {
+    const res = await supabase.from(table).update({ avatar_url: avatarUrl }).eq("id", userId).select();
+    if (res.error) {
+      const msg = res.error.message ?? "";
+      if (msg.includes("does not exist") || msg.includes("relation") || msg.includes("column")) {
+        console.warn(`[avatar] ${table}에 avatar_url 컬럼 없음 또는 테이블 없음 — 다음 테이블 시도`);
+        continue;
+      }
+      console.error(`[avatar] ${table} update error:`, res.error);
+      return res;
+    }
+    if (res.data && res.data.length > 0) {
+      console.log(`[avatar] ${table}에 avatar_url 저장 성공 (${res.data.length}행)`);
+      return res;
+    }
+    // 에러 없이 0행 → 이 테이블에 해당 유저 없음, 다음 테이블 시도
+    console.warn(`[avatar] ${table} update 0행 — user_id(${userId}) 없거나 RLS 차단. 다음 테이블 시도`);
+  }
+  console.error("[avatar] 어떤 profiles 테이블에서도 avatar_url을 업데이트하지 못했습니다. userId:", userId);
+  return { data: [] as any[], error: null };
 }

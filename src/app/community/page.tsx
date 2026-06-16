@@ -283,7 +283,7 @@ export default function CommunityPage() {
       const res = await updateCommunityPost(editingPost.id, {
         title: postTitle.trim(), content: finalContent,
         file_url: fileUrl, file_name: fileName,
-      });
+      }, user.id);
       if (res.error) {
         console.error("updateCommunityPost error", res.error);
         showToast(res.error.message || "수정에 실패했습니다.", "error");
@@ -415,7 +415,7 @@ export default function CommunityPage() {
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmPost) return;
     setDeleting(true);
-    const res = await deleteCommunityPost(deleteConfirmPost.id);
+    const res = await deleteCommunityPost(deleteConfirmPost.id, user?.id);
     if (res.error) {
       console.error("deleteCommunityPost error", res.error);
       showToast(res.error.message || "삭제에 실패했습니다.", "error");

@@ -101,14 +101,17 @@ function formatDateKey(date: Date) { return date.toISOString().slice(0, 10); }
 function parseWeekday(value: string | number): number {
   if (typeof value === "number" && !Number.isNaN(value)) return value;
   const normalized = String(value).trim();
-  const numeric = Number(normalized.replace(/[^0-9]/g, ""));
-  if (!Number.isNaN(numeric)) return numeric;
+  // 한국어/영어 이름 먼저 확인 (숫자 추출보다 우선)
   const mapping: Record<string, number> = {
     일: 0, 일요일: 0, 월: 1, 월요일: 1, 화: 2, 화요일: 2,
     수: 3, 수요일: 3, 목: 4, 목요일: 4, 금: 5, 금요일: 5, 토: 6, 토요일: 6,
     Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6,
   };
-  return mapping[normalized] ?? 0;
+  if (mapping[normalized] !== undefined) return mapping[normalized];
+  // 숫자 추출 (예: "1", "1요일" 등)
+  const digits = normalized.replace(/[^0-9]/g, "");
+  if (digits) return Number(digits);
+  return 0;
 }
 
 function formatRelativeTime(date: Date | null): string {
@@ -254,7 +257,11 @@ export default function Home() {
     weekdayOrder.forEach((wd) => {
       const dayItems = schedule
         .filter((s) => s.weekday === wd)
-        .map((s) => ({ ...s, p: Number(s.period.replace(/[^0-9]/g, "")) }))
+        .map((s) => {
+          const digits = String(s.period).replace(/[^0-9]/g, "");
+          return { ...s, subject: s.subject.trim(), p: digits ? Number(digits) : 0 };
+        })
+        .filter((s) => s.p > 0)
         .sort((a, b) => a.p - b.p);
       const blocks: { subject: string; startPeriod: number; endPeriod: number; ids: string[] }[] = [];
       let i = 0;
@@ -366,14 +373,15 @@ export default function Home() {
       ]);
 
       if (!ttRes.error) {
-        setSchedule(
-          (ttRes.data ?? []).map((item: any) => ({
-            id: String(item.id),
-            subject: String(item.subject ?? ""),
-            weekday: parseWeekday(item.weekday),
-            period: String(item.period ?? ""),
-          })),
-        );
+        console.log("[TT-DEBUG] raw timetable data:", ttRes.data);
+        const parsed = (ttRes.data ?? []).map((item: any) => ({
+          id: String(item.id),
+          subject: String(item.subject ?? ""),
+          weekday: parseWeekday(item.weekday),
+          period: String(item.period ?? ""),
+        }));
+        console.log("[TT-DEBUG] parsed schedule:", parsed);
+        setSchedule(parsed);
       } else {
         console.error("시간표 에러:", ttRes.error);
         setSchedule([]);

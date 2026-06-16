@@ -196,19 +196,25 @@ export default function SettingsPage() {
     if (avatarFile && user) {
       const ext  = avatarFile.name.split(".").pop()?.toLowerCase() ?? "jpg";
       const path = `${user.id}/avatar.${ext}`;
+      console.log("[avatar] Storage 업로드 시작 — path:", path, "size:", avatarFile.size);
       const uploadRes = await uploadAvatar(path, avatarFile);
       if (uploadRes.error) {
         avatarError = true;
-        showToast("사진 업로드에 실패했습니다.", "error");
+        console.error("[avatar] Storage 업로드 실패:", uploadRes.error);
+        showToast(`사진 업로드 실패: ${uploadRes.error.message}`, "error");
       } else {
+        console.log("[avatar] Storage 업로드 성공");
         const publicUrl = `${getAvatarPublicUrl(path)}?t=${Date.now()}`;
+        console.log("[avatar] publicUrl:", publicUrl);
         const updateRes = await updateProfileAvatarUrl(user.id, publicUrl);
         if (updateRes.error) {
-          console.error("avatar_url 업데이트 실패:", updateRes.error);
+          console.error("[avatar] avatar_url DB 업데이트 실패:", updateRes.error);
+          showToast(`프로필 사진 DB 저장 실패: ${updateRes.error.message}`, "error");
+          avatarError = true;
         } else if (!updateRes.data || (Array.isArray(updateRes.data) && updateRes.data.length === 0)) {
-          console.warn("avatar_url 업데이트: 반영된 행 없음 (RLS 정책 또는 ID 불일치)");
+          console.warn("[avatar] avatar_url DB 업데이트: 반영된 행 없음 (RLS 정책 또는 profiles 테이블에 행 없음)");
         }
-        // 스토리지 업로드 성공 시 DB 저장 성패와 무관하게 로컬 즉시 반영
+        // Storage 업로드 성공 시 DB 저장 성패와 무관하게 로컬 즉시 반영
         updateLocalProfile({ avatarUrl: publicUrl });
         setAvatarFile(null);
         setAvatarPreview("");
