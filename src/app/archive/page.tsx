@@ -590,7 +590,6 @@ export default function ArchivePage() {
                   selectedFolder?.grade_level  === folder.grade_level  &&
                   selectedFolder?.semester     === folder.semester;
                 const isEditing = editingFolderKey === folderKey;
-                const isOwn = folder.user_id === user?.id;
                 return (
                   <div
                     key={folderKey}
@@ -656,21 +655,19 @@ export default function ArchivePage() {
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         {folder.fileCount === 0 ? "자료 없음" : `자료 ${folder.fileCount}개`}
                       </div>
-                      {isOwn && (
-                        <div className="flex items-center gap-1 text-xs" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
-                            className="font-medium text-sky-400 transition hover:text-sky-600 dark:text-sky-500 dark:hover:text-sky-300"
-                          >수정</button>
-                          <span className="text-slate-200 dark:text-slate-600">|</span>
-                          <button
-                            type="button"
-                            onClick={() => setDeleteFolderTarget(folder)}
-                            className="font-medium text-rose-400 transition hover:text-rose-600 dark:text-rose-500 dark:hover:text-rose-300"
-                          >삭제</button>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 text-xs" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={() => { setEditingFolderKey(folderKey); setEditSubjectName(folder.subject_name); }}
+                          className="font-medium text-sky-400 transition hover:text-sky-600 dark:text-sky-500 dark:hover:text-sky-300"
+                        >수정</button>
+                        <span className="text-slate-200 dark:text-slate-600">|</span>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteFolderTarget(folder)}
+                          className="font-medium text-rose-400 transition hover:text-rose-600 dark:text-rose-500 dark:hover:text-rose-300"
+                        >삭제</button>
+                      </div>
                     </div>
                   </div>
                 );

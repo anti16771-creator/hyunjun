@@ -279,6 +279,23 @@ export default function Home() {
     return result;
   }, [schedule, weekdayOrder]);
 
+  // ─── DEBUG: mergedBlocks 진단 (문제 파악 후 제거) ────────────────────────
+  useEffect(() => {
+    if (schedule.length === 0) {
+      console.log("[TT-DEBUG] schedule 비어있음 (데이터 없음)");
+      return;
+    }
+    console.log("[TT-DEBUG] schedule raw:", schedule);
+    const hasMultiSpan = weekdayOrder.some((wd) =>
+      (mergedBlocks[wd] ?? []).some((b) => b.endPeriod > b.startPeriod)
+    );
+    console.log("[TT-DEBUG] mergedBlocks:", mergedBlocks);
+    console.log("[TT-DEBUG] 2교시 이상 병합 블록 존재?", hasMultiSpan);
+    if (!hasMultiSpan) {
+      console.log("[TT-DEBUG] → 연속된 같은 과목 교시가 없어 병합 없음. 같은 요일·같은 과목명·연속 교시를 등록해야 합니다.");
+    }
+  }, [schedule, mergedBlocks, weekdayOrder]);
+
   // ─── 잔디 그래프 ─────────────────────────────────────────────────────────
   const [grassTooltip, setGrassTooltip] = useState<{ date: string; minutes: number; x: number; y: number } | null>(null);
 
